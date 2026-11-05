@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+dist/
+build/
+coverage/
+npm-debug.log*
+.wrangler/
+.dev.vars*
+!.dev.vars.example
+.idea/

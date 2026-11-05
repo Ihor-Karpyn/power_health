@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "power-health",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  // Перевірка «детектор на зв'язку» і нагадування про паузу
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "power-health",
+      // Встав сюди id з виводу `npx wrangler d1 create power-health`
+      "database_id": "f87bee05-9d74-4093-baf4-73217aaa9fb1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "TIMEZONE": "Europe/Kyiv",
+    // Через скільки хвилин тиші вважати детектор офлайн (heartbeat раз на 15 хв)
+    "OFFLINE_AFTER_MIN": "45",
+    // Відключення, коротші за стільки хвилин, стираються з каналу та історії
+    "BLIP_MAX_MIN": "5",
+    // Оператор у SvitloPulse для команди /queue 20.1 (ДТЕК Київські електромережі)
+    "SCHEDULE_OPERATOR": "dtek-kem",
+    // Сайт ДТЕК для даних по адресі (/address): причина і орієнтовний час відновлення
+    "DTEK_SITE": "https://www.dtek-kem.com.ua"
+  }
+  // Секрети (wrangler secret bulk .env): BOT_TOKEN, DEVICE_SECRET, WEBHOOK_SECRET, OWNER_USER_ID
+}

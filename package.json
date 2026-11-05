@@ -1,0 +1,22 @@
+{
+  "name": "power-health",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram-бот: сповіщає, коли вдома зникає та з'являється світло",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc -p .",
+    "db:migrate": "wrangler d1 migrations apply power-health --remote",
+    "db:migrate:local": "wrangler d1 migrations apply power-health --local"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "wrangler": "^4.158.0"
+  }
+}
