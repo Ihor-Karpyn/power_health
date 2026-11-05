@@ -1,5 +1,5 @@
 import type { Ctx } from './env';
-import { formatDuration, formatEndTime, formatTime, localClock } from './format';
+import { bar, formatDuration, formatEndTime, formatTime, localClock, localDate, zonedMidnight } from './format';
 
 /** Відкритий API SvitloPulse: графіки операторів + ознака аварійних відключень. Без ключа. */
 const API = 'https://svitlopulse.andrewboyko.name/api/v1';
@@ -21,6 +21,8 @@ export interface GroupInfo {
   restore_at?: string;
   today?: Interval[];
   tomorrow?: Interval[];
+  /** Кеш: графік на завтра ще не опублікований (рахується лише за потреби) */
+  tomorrow_pending?: boolean;
 }
 
 export type GroupResult = { ok: true; group: GroupInfo } | { ok: false; notFound: boolean };
@@ -81,6 +83,38 @@ export async function loadConfiguredGroup(ctx: Ctx): Promise<GroupInfo | null> {
   return res.ok ? res.group : null;
 }
 
+/** YYYY-MM-DD завтрашньої дати за місцевим часом */
+function tomorrowDate(now: number, tz: string): string {
+  const t = localDate(now, tz);
+  const d = localDate(zonedMidnight(t.year, t.month, t.day + 1, tz) + 12 * 3_600_000, tz);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.year}-${p(d.month)}-${p(d.day)}`;
+}
+
+/**
+ * Чи ще не опублікований графік на завтра. Порожній `tomorrow` у /groups неоднозначний
+ * («не опубліковано» або «відключень немає»), тож перепитуємо /history/plan — лише раз на об'єкт.
+ */
+export async function tomorrowPending(ctx: Ctx, g: GroupInfo): Promise<boolean> {
+  if ((g.tomorrow ?? []).length > 0) return false;
+  if (g.tomorrow_pending === undefined) {
+    const plan = await fetchPlan(ctx, g.key, tomorrowDate(ctx.now(), ctx.env.TIMEZONE));
+    g.tomorrow_pending = plan.status !== 'published';
+  }
+  return g.tomorrow_pending;
+}
+
+/**
+ * Інтервал, що закінчується сьогоднішньою північчю, може тривати й завтра — якщо графік на завтра
+ * ще не опублікований, кажемо про це. Повертає текст примітки або null.
+ */
+export async function midnightNote(ctx: Ctx, g: GroupInfo, end: number): Promise<string | null> {
+  const tz = ctx.env.TIMEZONE;
+  const t = localDate(ctx.now(), tz);
+  if (end !== zonedMidnight(t.year, t.month, t.day + 1, tz)) return null;
+  return (await tomorrowPending(ctx, g)) ? 'графік на завтра ще не опублікований' : null;
+}
+
 /** Рядок для «🔴 Світло зникло»: до котрої за графіком. null — якщо черга не задана або API недоступний. */
 export async function outageScheduleLine(ctx: Ctx, at: number): Promise<string | null> {
   const g = await loadConfiguredGroup(ctx);
@@ -92,7 +126,8 @@ export async function outageScheduleLine(ctx: Ctx, at: number): Promise<string |
   const current = offIntervals(g).find((i) => i.start - EARLY_TOLERANCE <= at && at < i.end);
   const end = current?.end ?? (g.state === 'off' && g.restore_at ? Date.parse(g.restore_at) : null);
   if (end !== null && Number.isFinite(end) && end > now) {
-    return `📅 За графіком: до ${formatEndTime(end, tz, now)} (ще ~${formatDuration(end - now)})`;
+    const note = await midnightNote(ctx, g, end);
+    return `📅 За графіком: до ${formatEndTime(end, tz, now)} (ще ~${formatDuration(end - now)})${note ? `, ${note}` : ''}`;
   }
   if (g.plan_status === 'applies') return 'ℹ️ Відключення поза графіком';
   return null;
@@ -106,7 +141,8 @@ export async function nextOutageLine(ctx: Ctx, at: number): Promise<string | nul
   if (!next) return null;
   const tz = ctx.env.TIMEZONE;
   const now = ctx.now();
-  return `📅 Наступне відключення за графіком: ${formatTime(next.start, tz, now)}–${formatEndTime(next.end, tz, now)}`;
+  const note = await midnightNote(ctx, g, next.end);
+  return `📅 Наступне відключення за графіком: ${formatTime(next.start, tz, now)}–${formatEndTime(next.end, tz, now)}${note ? ` (${note})` : ''}`;
 }
 
 /** Короткий опис стану черги для /status і /queue */
@@ -154,20 +190,37 @@ function hm(ms: number, tz: string, isEnd = false): string {
   return `${p(t.hour)}:${p(minute)}`;
 }
 
-/** Повідомлення «графік на завтра» */
-export function tomorrowText(slots: Interval[], dateLabel: string, group: string, tz: string): string {
+/**
+ * Повідомлення «графік на завтра». [dayStart, dayEnd) — межі доби (23/25 год у дні переходу на літній/зимовий час),
+ * від них рахується відсоток часу зі світлом — як шкала в статистиці.
+ */
+export function tomorrowText(
+  slots: Interval[],
+  dateLabel: string,
+  group: string,
+  tz: string,
+  dayStart: number,
+  dayEnd: number,
+): string {
   const off = mergeOff(slots);
   const title = `📅 Графік на завтра, ${dateLabel} (черга ${group.split(':')[1] ?? group})`;
-  if (off.length === 0) return `${title}\nВідключень за графіком не заплановано 🎉`;
-  const total = off.reduce((sum, i) => sum + (i.end - i.start), 0);
+  const total = off.reduce((sum, i) => sum + Math.max(0, Math.min(i.end, dayEnd) - Math.max(i.start, dayStart)), 0);
+  const pct = Math.round((100 * (dayEnd - dayStart - total)) / (dayEnd - dayStart));
+  const scale = `${bar(pct)} ${pct}% часу зі світлом`;
+  if (off.length === 0) return `${title}\n${scale}\nВідключень за графіком не заплановано 🎉`;
   return [
     title,
+    scale,
     ...off.map((i) => `🔴 ${hm(i.start, tz)}–${hm(i.end, tz, true)} (${formatDuration(i.end - i.start)})`),
     `Без світла за графіком: ${formatDuration(total)}`,
   ].join('\n');
 }
 
-/** Попередження перед відключенням за графіком */
-export function warningText(next: { start: number; end: number }, now: number, tz: string): string {
-  return `⏰ О ${formatTime(next.start, tz, now)} відключення за графіком, до ${formatEndTime(next.end, tz, now)} (через ~${formatDuration(next.start - now)})`;
+/**
+ * Попередження перед відключенням за графіком. `sentAt` — момент надсилання: від нього «через ~N хв»,
+ * щоб під час редагування (коли з'явився графік на завтра) ця частина не змінювалась.
+ */
+export function warningText(next: { start: number; end: number }, sentAt: number, tz: string, note: string | null): string {
+  const main = `⏰ О ${formatTime(next.start, tz, sentAt)} відключення за графіком, до ${formatEndTime(next.end, tz, sentAt)} (через ~${formatDuration(next.start - sentAt)})`;
+  return note ? `${main}\nℹ️ Можливо, й довше: ${note}` : main;
 }

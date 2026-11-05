@@ -2,7 +2,7 @@ import { notify, notifyOwner, type Ctx } from './env';
 import { formatDuration, formatTime, localClock, localDate, zonedMidnight } from './format';
 import { getState, updateState, type State } from './state';
 import { refreshOutageMessage } from './outage-message';
-import { fetchGroup, fetchPlan, isEmergency, offIntervals, tomorrowText, warningText, type GroupInfo } from './schedule';
+import { fetchGroup, fetchPlan, isEmergency, midnightNote, offIntervals, tomorrowText, warningText, type GroupInfo } from './schedule';
 import { updatePinnedStatus } from './status-message';
 import { monthlyReport, weeklyReport } from './stats';
 
@@ -65,6 +65,7 @@ export async function runCron(ctx: Ctx): Promise<void> {
     const res = await fetchGroup(ctx, fresh.schedule_group);
     group = res.ok ? res.group : null;
   }
+  await refreshWarning(ctx, fresh, group);
   await warnUpcomingOutage(ctx, fresh, group);
   await sendTomorrowSchedule(ctx, fresh);
   await updatePinnedStatus(ctx, group);
@@ -76,8 +77,34 @@ async function warnUpcomingOutage(ctx: Ctx, s: State, g: GroupInfo | null): Prom
   const now = ctx.now();
   const next = offIntervals(g).find((i) => i.start > now && i.start - now <= WARN_BEFORE);
   if (!next || s.warned_outage_start === next.start) return;
+  const text = warningText(next, now, ctx.env.TIMEZONE, await midnightNote(ctx, g, next.end));
   await updateState(ctx.db, { warned_outage_start: next.start });
-  await notify(ctx, warningText(next, now, ctx.env.TIMEZONE));
+  const sent = await notify(ctx, text);
+  await updateState(ctx.db, {
+    warn_message_chat_id: sent?.chat_id ?? null,
+    warn_message_id: sent?.message_id ?? null,
+    warn_sent_at: now,
+    warn_text: text,
+  });
+}
+
+/**
+ * Попередження могло піти, коли графіка на завтра ще не було («до 24:00, можливо й довше»).
+ * Щойно графік з'явиться і інтервал подовжиться — редагуємо попередження.
+ */
+async function refreshWarning(ctx: Ctx, s: State, g: GroupInfo | null): Promise<void> {
+  if (!g || s.warn_message_id === null || s.warn_message_chat_id === null) return;
+  if (s.warned_outage_start === null || s.warn_sent_at === null) return;
+  const interval = offIntervals(g).find((i) => i.start === s.warned_outage_start);
+  if (!interval || ctx.now() >= interval.end) return;
+  const text = warningText(interval, s.warn_sent_at, ctx.env.TIMEZONE, await midnightNote(ctx, g, interval.end));
+  if (text === s.warn_text) return;
+  await updateState(ctx.db, { warn_text: text });
+  try {
+    await ctx.tg.call('editMessageText', { chat_id: s.warn_message_chat_id, message_id: s.warn_message_id, text });
+  } catch (err) {
+    console.error('could not update the warning', err);
+  }
 }
 
 /** Графік на завтра — з 22:00, щойно оператор його опублікує (до кінця доби), один раз */
@@ -95,7 +122,12 @@ async function sendTomorrowSchedule(ctx: Ctx, s: State): Promise<void> {
   const plan = await fetchPlan(ctx, s.schedule_group, date);
   if (plan.status !== 'published') return; // ще не опублікували — спробуємо за 5 хв
   await updateState(ctx.db, { tomorrow_sent_date: today });
-  await notify(ctx, tomorrowText(plan.slots, `${pad(tomorrow.day)}.${pad(tomorrow.month)}`, s.schedule_group, tz));
+  const dayStart = zonedMidnight(t.year, t.month, t.day + 1, tz);
+  const dayEnd = zonedMidnight(t.year, t.month, t.day + 2, tz);
+  await notify(
+    ctx,
+    tomorrowText(plan.slots, `${pad(tomorrow.day)}.${pad(tomorrow.month)}`, s.schedule_group, tz, dayStart, dayEnd),
+  );
 }
 
 /**
@@ -111,11 +143,11 @@ async function sendScheduledReports(ctx: Ctx, s: State): Promise<void> {
   if (t.weekday === 1 && s.last_weekly_report !== today) {
     await updateState(ctx.db, { last_weekly_report: today });
     const text = await weeklyReport(ctx);
-    if (text) await notify(ctx, text);
+    if (text) await notify(ctx, text, { html: true });
   }
   if (t.day === 1 && s.last_monthly_report !== today) {
     await updateState(ctx.db, { last_monthly_report: today });
     const text = await monthlyReport(ctx);
-    if (text) await notify(ctx, text);
+    if (text) await notify(ctx, text, { html: true });
   }
 }

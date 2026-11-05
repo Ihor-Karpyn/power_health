@@ -28,6 +28,10 @@ export interface State {
   status_message_id: number | null;
   status_text: string | null;
   status_pin_warned: number;
+  warn_message_chat_id: number | null;
+  warn_message_id: number | null;
+  warn_sent_at: number | null;
+  warn_text: string | null;
 }
 
 export async function getState(db: D1Database): Promise<State> {

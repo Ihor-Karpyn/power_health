@@ -4,6 +4,7 @@ import { runCron } from '../src/cron';
 import { handleReport, parseReport, type ReportKind } from '../src/device';
 import { formatDuration, formatEndTime, startOfDay } from '../src/format';
 import { route } from '../src/index';
+import { tomorrowText } from '../src/schedule';
 import { getState } from '../src/state';
 import {
   CHANNEL,
@@ -51,6 +52,15 @@ describe('formatting', () => {
     expect(formatDuration(45 * MIN)).toBe('45 хв');
     expect(formatDuration(3 * HOUR + 12 * MIN)).toBe('3 год 12 хв');
     expect(formatDuration(26 * HOUR + 5 * MIN)).toBe('26 год 5 хв');
+  });
+
+  it('counts the light share of a 25-hour day (DST end)', () => {
+    const dayStart = Date.UTC(2026, 9, 24, 21); // 25.10 00:00 за Києвом (UTC+3)
+    const dayEnd = Date.UTC(2026, 9, 25, 22); // 26.10 00:00 (UTC+2) — доба 25 год
+    const slots = [{ start: '2026-10-25T10:00:00+02:00', end: '2026-10-25T15:00:00+02:00', kind: 'off' }];
+    expect(tomorrowText(slots, '25.10', 'dtek-kem:20.1', 'Europe/Kyiv', dayStart, dayEnd)).toBe(
+      '📅 Графік на завтра, 25.10 (черга 20.1)\n■■■■■■■■□□ 80% часу зі світлом\n🔴 10:00–15:00 (5 год)\nБез світла за графіком: 5 год',
+    );
   });
 
   it('shows the end of the day as 24:00', () => {
@@ -458,6 +468,8 @@ describe('/stats', () => {
 
   async function stats() {
     await command('/stats');
+    // таблиці — у <pre>, тому повідомлення має йти з parse_mode HTML
+    expect(ctx.calls.find((c) => c.method === 'sendMessage')?.params.parse_mode).toBe('HTML');
     return ctx.dm()[0]!;
   }
 
@@ -489,25 +501,22 @@ describe('/stats', () => {
         '⏱ В середньому 5 год, найдовше 6 год',
         '📉 Світла менше, ніж за попередні 7 днів: 83% проти 100%',
         '',
-        'По днях:',
-        'Вт 03.11  ████████░░ 83% · 1 відкл., без світла 4 год',
-        'Ср 04.11  ████████░░ 83% · 1 відкл., без світла 4 год',
-        'Чт 05.11 (до 10:00)  ████████░░ 80% · 1 відкл., без світла 2 год',
+        'По днях: % часу зі світлом · без світла год:хв × відключень',
+        '<pre>Вт 03.11 ■■■■■■■■□□  83%   4:00 ×1',
+        'Ср 04.11 ■■■■■■■■□□  83%   4:00 ×1',
+        'Чт 05.11 ■■■■■■■■□□  80%   2:00 ×1</pre>',
+        'Чт 05.11 — сьогодні, до 10:00',
         '',
         '📅 Останні 12 місяців',
         '↑ / ↓ — світла більше / менше, ніж у попередньому місяці',
+        '<pre>Вер 2026 ■■■■■□□□□□  50%',
+        'Жов 2026 ■■■■■■■■■■ 100% ↑',
+        'Лис 2026 ■■■■■■■■□□  83% ↓</pre>',
         '',
-        'Вер 2026 (дані за 10 дн.)',
-        '█████░░░░░ 50%',
-        'без світла ~12 год на добу · 1 відкл. (0,1/добу) · найдовше 120 год',
-        '',
-        'Жов 2026 (дані за 1 дн.)',
-        '██████████ 100% ↑',
-        'без відключень',
-        '',
-        'Лис 2026 (дані за 2 дн.)',
-        '████████░░ 83% ↓',
-        'без світла ~4 год 8 хв на добу · 2 відкл. (0,8/добу) · найдовше 6 год',
+        'Без світла на добу · відключень · найдовше:',
+        'Вер 2026: ~12 год на добу · 1 відкл. (0,1/добу) · найдовше 120 год (дані за 10 дн.)',
+        'Жов 2026: без відключень (дані за 1 дн.)',
+        'Лис 2026: ~4 год 8 хв на добу · 2 відкл. (0,8/добу) · найдовше 6 год (дані за 2 дн.)',
       ].join('\n'),
     );
   });
@@ -817,6 +826,43 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       expect(ctx.sent()).toEqual(['⏰ О 21:30 відключення за графіком, до 06.11 02:00 (через ~25 хв)']);
     });
 
+    it("updates the warning once tomorrow's schedule is published", async () => {
+      // о 21:00 графіка на завтра ще немає: інтервал обривається опівночі
+      ctx.groups[KEY] = { ...ctx.groups[KEY], tomorrow: [] };
+      await cronAt(at(5, 21, 5));
+      expect(ctx.sent()).toEqual([
+        '⏰ О 21:30 відключення за графіком, до 24:00 (через ~25 хв)\nℹ️ Можливо, й довше: графік на завтра ще не опублікований',
+      ]);
+      const warningId = (await getState(ctx.db)).warn_message_id;
+
+      await cronAt(at(5, 21, 10)); // досі не опубліковано — не редагуємо
+      expect(ctx.calls.filter((c) => c.method === 'editMessageText' && String(c.params.text).startsWith('⏰'))).toEqual([]);
+
+      // ДТЕК опублікував графік: відключення триває до 04:30
+      ctx.groups[KEY] = { ...ctx.groups[KEY], tomorrow: [slot('00:00', '04:30', 6)] };
+      await cronAt(at(5, 21, 20));
+      expect(ctx.calls.find((c) => c.method === 'editMessageText' && String(c.params.text).startsWith('⏰'))?.params).toEqual({
+        chat_id: CHANNEL.id,
+        message_id: warningId,
+        text: '⏰ О 21:30 відключення за графіком, до 06.11 04:30 (через ~25 хв)',
+      });
+      expect(ctx.sent()).toEqual([]); // нового повідомлення немає — лише редагування
+    });
+
+    it('says "до 24:00" without a note when tomorrow is published without outages', async () => {
+      ctx.groups[KEY] = { ...ctx.groups[KEY], tomorrow: [] };
+      ctx.plans[`${KEY}|2026-11-06`] = { status: 'applies', slots: [] };
+      await cronAt(at(5, 21, 5));
+      expect(ctx.sent()).toEqual(['⏰ О 21:30 відключення за графіком, до 24:00 (через ~25 хв)']);
+    });
+
+    it('notes an unpublished tomorrow in the outage message', async () => {
+      ctx.groups[KEY] = { ...ctx.groups[KEY], tomorrow: [] };
+      ctx.setNow(at(5, 21, 57));
+      await report(false);
+      expect(ctx.sent().at(-1)).toContain('📅 За графіком: до 24:00 (ще ~2 год 3 хв), графік на завтра ще не опублікований');
+    });
+
     it('stays quiet when power is already off or during emergency outages', async () => {
       ctx.setNow(at(5, 10, 20));
       await report(false);
@@ -843,6 +889,7 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       expect(ctx.sent()).toEqual([
         [
           '📅 Графік на завтра, 06.11 (черга 20.1)',
+          '■■■□□□□□□□ 31% часу зі світлом',
           '🔴 02:00–08:30 (6 год 30 хв)',
           '🔴 11:00–18:30 (7 год 30 хв)',
           '🔴 21:30–24:00 (2 год 30 хв)',
@@ -867,7 +914,9 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       expect(ctx.sent()).toEqual([]);
       ctx.plans[`${KEY}|2026-11-06`] = { status: 'applies', slots: [] };
       await cronAt(at(5, 22, 5));
-      expect(ctx.sent()).toEqual(['📅 Графік на завтра, 06.11 (черга 20.1)\nВідключень за графіком не заплановано 🎉']);
+      expect(ctx.sent()).toEqual([
+        '📅 Графік на завтра, 06.11 (черга 20.1)\n■■■■■■■■■■ 100% часу зі світлом\nВідключень за графіком не заплановано 🎉',
+      ]);
     });
   });
 
@@ -960,11 +1009,11 @@ describe('scheduled reports', () => {
     expect(await cronAt(kyivNov(9, 18, 0))).toEqual([]);
 
     expect(report).toMatch(/^🗓 Тиждень 02\.11 – 08\.11\n💡 Світло було 96% часу\n🔴 Без світла 6 год, відключень: 1/);
-    expect(report).toContain('Пн 02.11  ██████████ 100% · без відключень');
-    expect(report).toContain('Ср 04.11  ████████░░ 75% · 1 відкл., без світла 6 год');
-    expect(report).toContain('Нд 08.11  ██████████ 100%');
+    expect(report).toContain('<pre>Пн 02.11 ■■■■■■■■■■ 100%\n');
+    expect(report).toContain('\nСр 04.11 ■■■■■■■■□□  75%   6:00 ×1\n');
+    expect(report).toContain('\nНд 08.11 ■■■■■■■■■■ 100%</pre>');
     expect(report).not.toContain('09.11'); // поточний понеділок у звіт не потрапляє
-    expect(report).not.toContain('(до ');
+    expect(report).not.toContain('сьогодні');
   });
 
   it('uses Kyiv time in summer too (UTC+3)', async () => {
@@ -988,7 +1037,8 @@ describe('scheduled reports', () => {
 
     expect(report).toMatch(/^🗓 Підсумки місяця: листопад 2026\n\n📅 Останні 12 місяців/);
     // дані за 29 із 30 днів — позначку «дані за N дн.» ставимо, лише коли бракує більше доби
-    expect(report).toContain('Лис 2026\n██████████ 99%\nбез світла ~12 хв на добу · 1 відкл. (<0,1/добу) · найдовше 6 год');
+    expect(report).toContain('<pre>Лис 2026 ■■■■■■■■■■  99%</pre>');
+    expect(report).toContain('Лис 2026: ~12 хв на добу · 1 відкл. (&lt;0,1/добу) · найдовше 6 год');
     expect(report).not.toContain('Гру 2026');
   });
 });

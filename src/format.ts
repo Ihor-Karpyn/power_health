@@ -90,3 +90,21 @@ export function startOfDay(ms: number, tz: string): number {
   const d = localDate(ms, tz);
   return zonedMidnight(d.year, d.month, d.day, tz);
 }
+
+/**
+ * Шкала «■■■■■■■■□□» для відсотка (0–100). Окремі квадрати, а не «█», щоб поділки не зливались
+ * у суцільну смугу і їх можна було порахувати.
+ */
+export function bar(pct: number): string {
+  const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
+  return '■'.repeat(filled) + '□'.repeat(10 - filled);
+}
+
+/** Тривалість як «год:хв» для таблиць: «4:30», «16:05» */
+export function hoursMinutes(ms: number): string {
+  const totalMin = Math.round(Math.max(0, ms) / 60_000);
+  return `${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, '0')}`;
+}
+
+/** Екранування для parse_mode HTML */
+export const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

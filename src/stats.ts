@@ -1,5 +1,5 @@
 import type { Ctx } from './env';
-import { formatDuration, formatTime, localDate, zonedMidnight } from './format';
+import { bar, escapeHtml as esc, formatDuration, formatTime, hoursMinutes, localDate, zonedMidnight } from './format';
 import { loadPeriods, summarize, type Period, type Summary } from './state';
 
 const DAY = 86_400_000;
@@ -16,11 +16,14 @@ const tracked = (s: Summary) => s.on + s.off;
 const lightPct = (s: Summary) => Math.round((100 * s.on) / tracked(s));
 const pad2 = (n: number) => String(n).padStart(2, '0');
 const perDay = (n: number) => (n < 0.05 ? '<0,1' : n.toFixed(1).replace('.', ','));
+const pctCell = (pct: number) => `${pct}%`.padStart(4);
 
-function bar(pct: number): string {
-  const filled = Math.round(pct / 10);
-  return '█'.repeat(filled) + '░'.repeat(10 - filled);
-}
+/**
+ * Таблиця моноширинним шрифтом: кожен рядок починається з мітки однакової ширини (8 символів),
+ * тому шкали стоять рівно одна під одною і їх зручно порівнювати.
+ */
+const table = (rows: string[]) => `<pre>${esc(rows.join('\n'))}</pre>`;
+
 
 /** dd.mm для доби, що починається в dayStart */
 function dayLabel(dayStart: number, tz: string): string {
@@ -54,7 +57,7 @@ function weekLines(opts: {
   const week = sum(dayStarts[6]!, end);
   if (tracked(week) === 0) return null;
 
-  const lines = [opts.title];
+  const lines = [esc(opts.title)];
   const pct = lightPct(week);
   lines.push(`💡 Світло було ${pct}% часу`);
   if (week.offCount > 0) {
@@ -75,23 +78,28 @@ function weekLines(opts: {
     else lines.push(`➖ Приблизно як ${opts.versus} (${prevPct}%)`);
   }
 
-  lines.push('', 'По днях:');
+  const rows: string[] = [];
+  let partial = '';
   for (let i = 6; i >= 0; i--) {
     const from = dayStarts[i]!;
     const to = i === 0 ? end : dayStarts[i - 1]!;
     const s = sum(from, to);
     if (tracked(s) === 0) continue;
-    const weekday = WEEKDAYS[new Date(from + DAY / 2).getUTCDay()];
-    const partial = to === now ? ` (до ${formatTime(now, tz, now)})` : '';
-    const detail = s.offCount > 0 ? `${s.offCount} відкл., без світла ${formatDuration(s.off)}` : 'без відключень';
-    lines.push(`${weekday} ${dayLabel(from, tz)}${partial}  ${bar(lightPct(s))} ${lightPct(s)}% · ${detail}`);
+    const label = `${WEEKDAYS[new Date(from + DAY / 2).getUTCDay()]} ${dayLabel(from, tz)}`;
+    if (to === now) partial = `${label} — сьогодні, до ${formatTime(now, tz, now)}`;
+    const off = s.offCount > 0 ? `  ${hoursMinutes(s.off).padStart(5)} ×${s.offCount}` : '';
+    rows.push(`${label} ${bar(lightPct(s))} ${pctCell(lightPct(s))}${off}`);
   }
+  lines.push('', 'По днях: % часу зі світлом · без світла год:хв × відключень', table(rows));
+  if (partial) lines.push(esc(partial));
   return lines;
 }
 
 /** Місяці: monthStarts[0] — останній місяць (закінчується в end), [11] — найстаріший */
 function monthLines(monthStarts: number[], end: number, sum: Sum): string[] | null {
-  const lines = ['📅 Останні 12 місяців', '↑ / ↓ — світла більше / менше, ніж у попередньому місяці'];
+  const lines = [MONTHS_TITLE, esc(MONTHS_LEGEND)];
+  const rows: string[] = [];
+  const details: string[] = [];
   let prevPct: number | null = null;
 
   for (let i = 11; i >= 0; i--) {
@@ -103,24 +111,26 @@ function monthLines(monthStarts: number[], end: number, sum: Sum): string[] | nu
     const pct = lightPct(s);
     const days = tracked(s) / DAY;
     const mid = monthOf(from);
-    let label = `${MONTHS[mid.getUTCMonth()]} ${mid.getUTCFullYear()}`;
-    if (days < (to - from) / DAY - 1) label += ` (дані за ${Math.max(1, Math.round(days))} дн.)`;
+    const label = `${MONTHS[mid.getUTCMonth()]} ${mid.getUTCFullYear()}`;
+    const partial = days < (to - from) / DAY - 1 ? ` (дані за ${Math.max(1, Math.round(days))} дн.)` : '';
 
     let arrow = '';
     if (prevPct !== null) arrow = pct - prevPct >= SAME_PCT ? ' ↑' : prevPct - pct >= SAME_PCT ? ' ↓' : ' =';
     prevPct = pct;
 
-    lines.push(
-      '',
-      label,
-      `${bar(pct)} ${pct}%${arrow}`,
+    rows.push(`${label} ${bar(pct)} ${pctCell(pct)}${arrow}`);
+    details.push(
       s.offCount > 0
-        ? `без світла ~${formatDuration(s.off / days)} на добу · ${s.offCount} відкл. (${perDay(s.offCount / days)}/добу) · найдовше ${formatDuration(s.longestOff)}`
-        : 'без відключень',
+        ? `${label}: ~${formatDuration(s.off / days)} на добу · ${s.offCount} відкл. (${perDay(s.offCount / days)}/добу) · найдовше ${formatDuration(s.longestOff)}${partial}`
+        : `${label}: без відключень${partial}`,
     );
   }
-  return prevPct === null ? null : lines;
+  if (prevPct === null) return null;
+  return [...lines, table(rows), '', 'Без світла на добу · відключень · найдовше:', ...details.map(esc)];
 }
+
+const MONTHS_TITLE = '📅 Останні 12 місяців';
+const MONTHS_LEGEND = '↑ / ↓ — світла більше / менше, ніж у попередньому місяці';
 
 /** Початки 14 діб, починаючи з доби lastDayOffset днів тому (0 — сьогодні) */
 function dayStartsFrom(ctx: Ctx, lastDayOffset: number): number[] {
@@ -153,11 +163,7 @@ export async function statsText(ctx: Ctx): Promise<string> {
     now,
     tz,
   }) ?? ['📊 Останні 7 днів', 'Даних немає'];
-  const months = monthLines(monthStarts, now, sum) ?? [
-    '📅 Останні 12 місяців',
-    '↑ / ↓ — світла більше / менше, ніж у попередньому місяці',
-    'Даних немає',
-  ];
+  const months = monthLines(monthStarts, now, sum) ?? [MONTHS_TITLE, esc(MONTHS_LEGEND), 'Даних немає'];
   return [...week, '', ...months].join('\n');
 }
 
@@ -182,5 +188,5 @@ export async function monthlyReport(ctx: Ctx): Promise<string | null> {
   const lines = monthLines(monthStarts, thisMonthStart, sum);
   if (!lines) return null;
   const mid = monthOf(monthStarts[0]!);
-  return [`🗓 Підсумки місяця: ${MONTHS_FULL[mid.getUTCMonth()]} ${mid.getUTCFullYear()}`, '', ...lines].join('\n');
+  return [esc(`🗓 Підсумки місяця: ${MONTHS_FULL[mid.getUTCMonth()]} ${mid.getUTCFullYear()}`), '', ...lines].join('\n');
 }

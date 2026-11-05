@@ -55,7 +55,7 @@ export async function handleUpdate(ctx: Ctx, update: TgUpdate): Promise<void> {
     case 'status':
       return reply(await statusText(ctx));
     case 'stats':
-      return reply(await statsText(ctx));
+      return notifyOwner(ctx, await statsText(ctx), { html: true });
     case 'pause':
       await reply(await pause(ctx, msg.from!));
       return inBackground(ctx, () => updatePinnedStatus(ctx));

@@ -1,14 +1,17 @@
 import { notifyOwner, type Ctx } from './env';
 import type { TrackedDtek } from './dtek';
 import { formatDuration, formatEndTime, formatTime } from './format';
-import { fetchGroup, isEmergency, offIntervals, type GroupInfo } from './schedule';
+import { fetchGroup, isEmergency, midnightNote, offIntervals, type GroupInfo } from './schedule';
 import { getState, updateState, type State } from './state';
 
 /**
  * Закріплене в каналі повідомлення «що зараз»: бот редагує його раз на 5 хв (cron)
  * і одразу після зміни стану. Якщо його видалили — створює нове.
  */
-export function renderStatus(s: State, g: GroupInfo | null, now: number, tz: string): string {
+export async function renderStatus(ctx: Ctx, s: State, g: GroupInfo | null): Promise<string> {
+  const now = ctx.now();
+  const tz = ctx.env.TIMEZONE;
+  const note = async (end: number) => (g ? await midnightNote(ctx, g, end) : null);
   const lines: string[] = [];
   const since = s.mode_since;
   const span = since !== null
@@ -28,12 +31,18 @@ export function renderStatus(s: State, g: GroupInfo | null, now: number, tz: str
     const dtek = s.off_dtek ? (JSON.parse(s.off_dtek) as TrackedDtek) : null;
     const planned = g && !isEmergency(g) ? offIntervals(g).find((i) => i.start <= now && now < i.end) : undefined;
     if (dtek?.end) lines.push(`🕦 ДТЕК: відновлення до ${formatTime(dtek.end, tz, now)}`);
-    else if (planned) lines.push(`📅 За графіком: до ${formatEndTime(planned.end, tz, now)}`);
+    else if (planned) {
+      const n = await note(planned.end);
+      lines.push(`📅 За графіком: до ${formatEndTime(planned.end, tz, now)}${n ? ` (${n})` : ''}`);
+    }
     else if (g && isEmergency(g)) lines.push('⚠️ Аварійні відключення, графік не діє');
   } else if (s.mode === 'on' && g) {
     const next = offIntervals(g).find((i) => i.start > now);
     if (isEmergency(g)) lines.push('⚠️ Аварійні відключення, графік не діє');
-    else if (next) lines.push(`📅 Наступне відключення: ${formatTime(next.start, tz, now)}–${formatEndTime(next.end, tz, now)}`);
+    else if (next) {
+      const n = await note(next.end);
+      lines.push(`📅 Наступне відключення: ${formatTime(next.start, tz, now)}–${formatEndTime(next.end, tz, now)}${n ? ` (${n})` : ''}`);
+    }
     else if ((g.tomorrow ?? []).length === 0) lines.push('📅 Сьогодні більше відключень за графіком немає');
     else lines.push('📅 Відключень за графіком не заплановано');
   }
@@ -53,7 +62,7 @@ export async function updatePinnedStatus(ctx: Ctx, group?: GroupInfo | null): Pr
     const res = await fetchGroup(ctx, s.schedule_group);
     g = res.ok ? res.group : null;
   }
-  const text = renderStatus(s, g, ctx.now(), ctx.env.TIMEZONE);
+  const text = await renderStatus(ctx, s, g);
 
   if (s.status_message_id !== null && s.status_message_chat_id === s.channel_id) {
     if (text === s.status_text) return;
