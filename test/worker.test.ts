@@ -743,6 +743,48 @@ describe('DTEK address data', () => {
     expect(edits()[0]).toContain('⚡️ ДТЕК: Аварійне відключення\n🕦 Орієнтовне відновлення: до 19:30 (було 18:30)');
   });
 
+  it('warns when DTEK answers but does not see the outage after 15 minutes', async () => {
+    await startTracking();
+    await setAddress();
+    ctx.advance(63 * MIN); // 11:03, ДТЕК нічого не повідомляє
+    await report(false);
+    const note = '⚠️ ДТЕК не бачить відключення за адресою. Можливо, проблема в будинку чи квартирі.';
+
+    ctx.clear();
+    ctx.advance(10 * MIN);
+    await runCron(ctx);
+    expect(edits()).toEqual([]); // ще в межах запізнення ДТЕК
+
+    ctx.advance(5 * MIN);
+    await runCron(ctx);
+    expect(edits()).toEqual([`🔴 Світло зникло о 11:03\nСвітло було: ≈ 1 год 3 хв\n${note}`]);
+
+    ctx.clear();
+    ctx.advance(5 * MIN);
+    await runCron(ctx);
+    expect(edits()).toEqual([]); // примітку додаємо один раз
+
+    // ДТЕК зареєстрував пізніше — примітку замінюють його дані
+    setHouse(house(STABILIZATION, '11:03 05.11.2026', '18:30 05.11.2026'));
+    ctx.advance(5 * MIN);
+    await runCron(ctx);
+    expect(edits()).toEqual([
+      `🔴 Світло зникло о 11:03\nСвітло було: ≈ 1 год 3 хв\n⚡️ ДТЕК: ${STABILIZATION}\n🕦 Орієнтовне відновлення: до 18:30`,
+    ]);
+  });
+
+  it('does not warn when the DTEK site is down', async () => {
+    await startTracking();
+    await setAddress();
+    ctx.advance(HOUR);
+    await report(false);
+    ctx.dtekDown = true;
+    ctx.clear();
+    ctx.advance(30 * MIN);
+    await runCron(ctx);
+    expect(edits()).toEqual([]);
+  });
+
   it('ignores a DTEK record left from an earlier outage', async () => {
     await startTracking();
     await setAddress();
