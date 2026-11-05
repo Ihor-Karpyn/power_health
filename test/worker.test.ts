@@ -4,7 +4,6 @@ import { runCron } from '../src/cron';
 import { handleReport, parseReport, type ReportKind } from '../src/device';
 import { formatDuration, formatEndTime, startOfDay } from '../src/format';
 import { route } from '../src/index';
-import { tomorrowText } from '../src/schedule';
 import { getState } from '../src/state';
 import {
   CHANNEL,
@@ -52,15 +51,6 @@ describe('formatting', () => {
     expect(formatDuration(45 * MIN)).toBe('45 хв');
     expect(formatDuration(3 * HOUR + 12 * MIN)).toBe('3 год 12 хв');
     expect(formatDuration(26 * HOUR + 5 * MIN)).toBe('26 год 5 хв');
-  });
-
-  it('counts the light share of a 25-hour day (DST end)', () => {
-    const dayStart = Date.UTC(2026, 9, 24, 21); // 25.10 00:00 за Києвом (UTC+3)
-    const dayEnd = Date.UTC(2026, 9, 25, 22); // 26.10 00:00 (UTC+2) — доба 25 год
-    const slots = [{ start: '2026-10-25T10:00:00+02:00', end: '2026-10-25T15:00:00+02:00', kind: 'off' }];
-    expect(tomorrowText(slots, '25.10', 'dtek-kem:20.1', 'Europe/Kyiv', dayStart, dayEnd)).toBe(
-      '📅 Графік на завтра, 25.10 (черга 20.1)\n■■■■■■■■□□ 80% часу зі світлом\n🔴 10:00–15:00 (5 год)\nБез світла за графіком: 5 год',
-    );
   });
 
   it('shows the end of the day as 24:00', () => {
@@ -889,7 +879,6 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       expect(ctx.sent()).toEqual([
         [
           '📅 Графік на завтра, 06.11 (черга 20.1)',
-          '■■■□□□□□□□ 31% часу зі світлом',
           '🔴 02:00–08:30 (6 год 30 хв)',
           '🔴 11:00–18:30 (7 год 30 хв)',
           '🔴 21:30–24:00 (2 год 30 хв)',
@@ -915,7 +904,7 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       ctx.plans[`${KEY}|2026-11-06`] = { status: 'applies', slots: [] };
       await cronAt(at(5, 22, 5));
       expect(ctx.sent()).toEqual([
-        '📅 Графік на завтра, 06.11 (черга 20.1)\n■■■■■■■■■■ 100% часу зі світлом\nВідключень за графіком не заплановано 🎉',
+        '📅 Графік на завтра, 06.11 (черга 20.1)\nВідключень за графіком не заплановано 🎉',
       ]);
     });
   });

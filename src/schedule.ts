@@ -1,5 +1,5 @@
 import type { Ctx } from './env';
-import { bar, formatDuration, formatEndTime, formatTime, localClock, localDate, zonedMidnight } from './format';
+import { formatDuration, formatEndTime, formatTime, localClock, localDate, zonedMidnight } from './format';
 
 /** Відкритий API SvitloPulse: графіки операторів + ознака аварійних відключень. Без ключа. */
 const API = 'https://svitlopulse.andrewboyko.name/api/v1';
@@ -190,27 +190,14 @@ function hm(ms: number, tz: string, isEnd = false): string {
   return `${p(t.hour)}:${p(minute)}`;
 }
 
-/**
- * Повідомлення «графік на завтра». [dayStart, dayEnd) — межі доби (23/25 год у дні переходу на літній/зимовий час),
- * від них рахується відсоток часу зі світлом — як шкала в статистиці.
- */
-export function tomorrowText(
-  slots: Interval[],
-  dateLabel: string,
-  group: string,
-  tz: string,
-  dayStart: number,
-  dayEnd: number,
-): string {
+/** Повідомлення «графік на завтра» */
+export function tomorrowText(slots: Interval[], dateLabel: string, group: string, tz: string): string {
   const off = mergeOff(slots);
   const title = `📅 Графік на завтра, ${dateLabel} (черга ${group.split(':')[1] ?? group})`;
-  const total = off.reduce((sum, i) => sum + Math.max(0, Math.min(i.end, dayEnd) - Math.max(i.start, dayStart)), 0);
-  const pct = Math.round((100 * (dayEnd - dayStart - total)) / (dayEnd - dayStart));
-  const scale = `${bar(pct)} ${pct}% часу зі світлом`;
-  if (off.length === 0) return `${title}\n${scale}\nВідключень за графіком не заплановано 🎉`;
+  if (off.length === 0) return `${title}\nВідключень за графіком не заплановано 🎉`;
+  const total = off.reduce((sum, i) => sum + (i.end - i.start), 0);
   return [
     title,
-    scale,
     ...off.map((i) => `🔴 ${hm(i.start, tz)}–${hm(i.end, tz, true)} (${formatDuration(i.end - i.start)})`),
     `Без світла за графіком: ${formatDuration(total)}`,
   ].join('\n');

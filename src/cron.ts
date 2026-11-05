@@ -122,12 +122,7 @@ async function sendTomorrowSchedule(ctx: Ctx, s: State): Promise<void> {
   const plan = await fetchPlan(ctx, s.schedule_group, date);
   if (plan.status !== 'published') return; // ще не опублікували — спробуємо за 5 хв
   await updateState(ctx.db, { tomorrow_sent_date: today });
-  const dayStart = zonedMidnight(t.year, t.month, t.day + 1, tz);
-  const dayEnd = zonedMidnight(t.year, t.month, t.day + 2, tz);
-  await notify(
-    ctx,
-    tomorrowText(plan.slots, `${pad(tomorrow.day)}.${pad(tomorrow.month)}`, s.schedule_group, tz, dayStart, dayEnd),
-  );
+  await notify(ctx, tomorrowText(plan.slots, `${pad(tomorrow.day)}.${pad(tomorrow.month)}`, s.schedule_group, tz));
 }
 
 /**
