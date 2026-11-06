@@ -1,5 +1,5 @@
 import { notify, notifyOwner, type Ctx } from './env';
-import { formatDuration, formatTime, localClock, localDate, zonedMidnight } from './format';
+import { formatDuration, localClock, localDate, zonedMidnight } from './format';
 import { getState, updateState, type State } from './state';
 import { refreshOutageMessage } from './outage-message';
 import { fetchGroup, fetchPlan, isEmergency, midnightNote, offIntervals, tomorrowText, warningText, type GroupInfo } from './schedule';
@@ -28,17 +28,8 @@ export async function runCron(ctx: Ctx): Promise<void> {
     s.last_seen !== null &&
     now - s.last_seen > offlineAfter
   ) {
+    // Без повідомлень (ні в канал, ні власнику) — стан видно внизу закріпленого повідомлення
     await updateState(db, { detector_offline: 1 });
-    const hint =
-      s.mode === 'off'
-        ? 'Світла немає, тож телефон міг розрядитись.'
-        : 'Перевір телефон: можливо, він вимкнувся або MacroDroid зупинився.';
-    // Власнику в особисті, не в канал: у каналі є підписники, їм це не потрібно
-    await notifyOwner(
-      ctx,
-      `⚠️ Детектор не на зв'язку вже ${formatDuration(now - s.last_seen)} ` +
-        `(останній сигнал о ${formatTime(s.last_seen, env.TIMEZONE, now)})\n${hint}`,
-    );
   }
 
   if (s.mode === 'paused' && s.mode_since !== null) {

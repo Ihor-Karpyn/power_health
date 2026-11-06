@@ -1,4 +1,4 @@
-import { notify, notifyOwner, type Ctx } from './env';
+import { notify, type Ctx } from './env';
 import { formatDuration, formatTime } from './format';
 import type { TrackedDtek } from './dtek';
 import { dtekForOutage, renderOff, type OffParts } from './outage-message';
@@ -72,10 +72,6 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
   }
   await updateState(db, fields);
 
-  if (s.detector_offline && s.last_seen !== null) {
-    await notifyOwner(ctx, `✅ Детектор знову на зв'язку (мовчав ${formatDuration(now - s.last_seen)})`);
-  }
-
   let result: ReportResult;
   const want: Mode = report.charging ? 'on' : 'off';
   if (!fresh) {
@@ -84,7 +80,6 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
     result = 'paused';
   } else if (s.mode === null || s.mode_since === null) {
     await switchMode(db, want, report.ts, { approx: true });
-    await notifyOwner(ctx, `📡 Детектор підключено. Зараз ${want === 'on' ? 'світло є 🟢' : 'світла немає 🔴'}`);
     result = 'initialized';
   } else if (s.mode !== want) {
     const exact = kind === 'event';

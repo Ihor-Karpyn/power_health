@@ -99,11 +99,12 @@ describe('parseReport', () => {
 });
 
 describe('power events', () => {
-  it('announces the initial state', async () => {
+  it('starts tracking silently', async () => {
     await activateChannel();
     expect(await report(true, 'heartbeat')).toBe('initialized');
-    expect(ctx.dm()).toEqual(['📡 Детектор підключено. Зараз світло є 🟢']); // службове — власнику
     expect(ctx.sent()).toEqual([]);
+    expect(ctx.dm()).toEqual([]);
+    expect((await getState(ctx.db)).mode).toBe('on');
   });
 
   it('reports outages with exact time and duration', async () => {
@@ -236,7 +237,7 @@ describe('short blips', () => {
 });
 
 describe('detector watchdog (cron)', () => {
-  it('alerts once when the phone goes silent and announces its return', async () => {
+  it('marks the detector offline after 45 min of silence without sending messages', async () => {
     await startTracking();
     ctx.advance(40 * MIN);
     await runCron(ctx);
@@ -246,15 +247,16 @@ describe('detector watchdog (cron)', () => {
     await runCron(ctx);
     ctx.advance(5 * MIN);
     await runCron(ctx);
-    // власнику в особисті, не в канал з підписниками
+    // ні в канал, ні власнику — стан видно лише в закріпленому повідомленні
     expect(ctx.sent()).toEqual([]);
-    expect(ctx.dm()).toHaveLength(1);
-    expect(ctx.dm()[0]).toMatch(/^⚠️ Детектор не на зв'язку вже 50 хв \(останній сигнал о 10:00\)/);
+    expect(ctx.dm()).toEqual([]);
+    expect((await getState(ctx.db)).detector_offline).toBe(1);
 
     ctx.clear();
     await report(true, 'heartbeat');
-    expect(ctx.dm()).toEqual(["✅ Детектор знову на зв'язку (мовчав 55 хв)"]);
     expect(ctx.sent()).toEqual([]);
+    expect(ctx.dm()).toEqual([]);
+    expect((await getState(ctx.db)).detector_offline).toBe(0);
   });
 
   it('a phone that died during an outage reports power back at the time it reappeared', async () => {
@@ -266,7 +268,7 @@ describe('detector watchdog (cron)', () => {
     ctx.clear();
     ctx.advance(2 * HOUR);
     await report(true, 'heartbeat'); // увімкнувся після появи світла
-    expect(ctx.dm()[0]).toMatch(/^✅ Детектор знову на зв'язку/);
+    expect(ctx.dm()).toEqual([]);
     // не «приблизно між 11:00 і 23:00», а час, коли детектор повернувся
     expect(ctx.sent()).toEqual([
       "🟢 Світло з'явилось о 23:00\nСвітла не було: ≈ 12 год\nℹ️ Детектор був без зв'язку, тож це час, коли він повернувся",
