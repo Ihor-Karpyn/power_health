@@ -34,6 +34,9 @@ export interface State {
   warn_text: string | null;
   on_message_chat_id: number | null;
   on_message_id: number | null;
+  /** Тестовий режим увімкнено (ms) — запити телефона не застосовуються */
+  test_since: number | null;
+  test_reminded_at: number | null;
 }
 
 export async function getState(db: D1Database): Promise<State> {

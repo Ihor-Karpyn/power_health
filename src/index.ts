@@ -67,7 +67,7 @@ export async function route(req: Request, ctx: Ctx): Promise<Response> {
     }
     const report = parseReport(body, ctx.now());
     if ('error' in report) return json(report, 400);
-    const result = await handleReport(ctx, report, kind);
+    const result = await handleReport(ctx, report, kind, body as Record<string, unknown>);
     return json({ ok: true, result, charging: report.charging, ts: new Date(report.ts).toISOString() });
   }
 

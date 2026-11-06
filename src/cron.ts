@@ -24,6 +24,7 @@ export async function runCron(ctx: Ctx): Promise<void> {
 
   if (
     (s.mode === 'on' || s.mode === 'off') &&
+    s.test_since === null && // у тестовому режимі запити не оновлюють last_seen — це не офлайн
     !s.detector_offline &&
     s.last_seen !== null &&
     now - s.last_seen > offlineAfter
@@ -32,17 +33,18 @@ export async function runCron(ctx: Ctx): Promise<void> {
     await updateState(db, { detector_offline: 1 });
   }
 
-  if (s.mode === 'paused' && s.mode_since !== null) {
+  // Не дати забути тестовий режим: через 1 год, далі кожні 3 год
+  if (s.test_since !== null) {
     const due =
-      s.pause_reminded_at === null
-        ? now - s.mode_since >= FIRST_PAUSE_REMINDER
-        : now - s.pause_reminded_at >= NEXT_PAUSE_REMINDER;
+      s.test_reminded_at === null
+        ? now - s.test_since >= FIRST_PAUSE_REMINDER
+        : now - s.test_reminded_at >= NEXT_PAUSE_REMINDER;
     if (due) {
-      await updateState(db, { pause_reminded_at: now });
+      await updateState(db, { test_reminded_at: now });
       await notifyOwner(
         ctx,
-        `⏸ Трекінг на паузі вже ${formatDuration(now - s.mode_since)}.\n` +
-          'Коли телефон знову буде на зарядці — /resume',
+        `🧪 Тестовий режим увімкнено вже ${formatDuration(now - s.test_since)} — запити телефона не записуються.\n` +
+          'Вимкнути: /testStop',
       );
     }
   }

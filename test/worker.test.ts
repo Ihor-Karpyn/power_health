@@ -245,18 +245,6 @@ describe('short blips', () => {
     expect(ctx.sent().at(-1)).toBe("🟢 Світло з'явилось о 11:02\nСвітла не було: 2 хв");
   });
 
-  it('erases a short outage right after /resume as well', async () => {
-    await startTracking();
-    await command('/pause');
-    ctx.advance(10 * MIN);
-    await report(true);
-    await command('/resume');
-    ctx.advance(MIN);
-    await report(false);
-    ctx.advance(2 * MIN);
-    expect(await report(true)).toBe('blip');
-  });
-
   describe('light that came back only briefly', () => {
     /** Відключення з 11:00; о 15:00 світло з'являється на `minutes` хв і знову зникає */
     async function briefLight(minutes: number) {
@@ -305,18 +293,6 @@ describe('short blips', () => {
       const { result } = await briefLight(2);
       expect(result).toBe('changed');
       expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло о 15:02/);
-    });
-
-    it('does not erase the first minutes after /resume', async () => {
-      await startTracking();
-      await command('/pause');
-      ctx.advance(10 * MIN);
-      await report(true);
-      await command('/resume'); // перед «світло є» — пауза, а не відключення
-      ctx.advance(2 * MIN);
-      ctx.clear();
-      expect(await report(false)).toBe('changed');
-      expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло/);
     });
   });
 
@@ -516,8 +492,8 @@ describe('channel activation', () => {
 describe('bot access', () => {
   it('ignores everyone except the owner', async () => {
     await command('/status', STRANGER);
-    await command('/pause', STRANGER);
-    await command('/resume', STRANGER);
+    await command('/testStart', STRANGER);
+    await command('/testStop', STRANGER);
     expect(ctx.calls).toEqual([]);
   });
 
@@ -537,78 +513,75 @@ describe('bot access', () => {
   });
 });
 
-describe('pause / resume', () => {
-  it('stops recording and notifications while paused', async () => {
+describe('test mode (/testStart, /testStop)', () => {
+  const heartbeat = (charging: boolean, changed_at?: unknown, extra: Record<string, unknown> = {}) => {
+    const raw: Record<string, unknown> = { charging, ts: ctx.now() / 1000, battery: 98, ...extra };
+    if (changed_at !== undefined) raw.changed_at = changed_at;
+    const parsed = parseReport(raw, ctx.now());
+    if ('error' in parsed) throw new Error(parsed.error);
+    return handleReport(ctx, parsed, 'heartbeat', raw);
+  };
+
+  /** Відключення з 11:00, о 13:00 вмикаємо тест */
+  async function outageThenTest() {
     await startTracking();
     ctx.advance(HOUR);
-    await command('/pause');
-    expect(ctx.dm()[0]).toMatch(/^⏸ Трекінг на паузі/);
+    await report(false); // 11:00
+    ctx.advance(2 * HOUR); // 13:00
+    await command('/testStart');
+    const before = await getState(ctx.db);
     ctx.clear();
+    return before;
+  }
 
-    ctx.advance(MIN);
-    expect(await report(false)).toBe('paused');
-    ctx.advance(50 * MIN); // поза паузою тут уже був би «детектор не на зв'язку»
-    await runCron(ctx);
+  it('does not write anything or post to the channel, and logs each request to the owner', async () => {
+    const before = await outageThenTest();
+    const powerBack = ctx.now() - 5 * MIN; // 12:55
+    expect(await heartbeat(true, powerBack / 1000)).toBe('test');
+
     expect(ctx.sent()).toEqual([]);
+    expect(ctx.dm()).toEqual([
+      "🧪 Heartbeat · 13:00:00\nЗарядка: є · 🔋 98%\nts: 13:00:00\nchanged_at: 12:55:00\n→ світло з'явилось о 12:55:00 (точно, з changed_at)",
+    ]);
+    const after = await getState(ctx.db);
+    expect(after).toMatchObject({ mode: 'off', mode_since: before.mode_since, phone_ts: before.phone_ts, last_seen: before.last_seen });
+    const { results } = await ctx.db.prepare('SELECT kind FROM periods ORDER BY id').all<{ kind: string }>();
+    expect(results.map((p) => p.kind)).toEqual(['on', 'off']); // відключення не розірване
   });
 
-  it('refuses to resume until the phone is charging again', async () => {
-    await startTracking();
-    await command('/pause');
-    ctx.advance(MIN);
-    await report(false);
-    ctx.clear();
-
-    await command('/resume');
-    expect(ctx.dm()).toEqual(['🔌 Телефон зараз не на зарядці. Підключи його і повтори /resume']);
-
-    ctx.clear();
-    ctx.advance(30 * MIN);
-    await report(true);
-    await command('/resume');
-    expect(ctx.dm()).toEqual(['▶️ Трекінг відновлено (пауза тривала 31 хв). Світло є 🟢']);
-    expect((await getState(ctx.db)).mode).toBe('on');
-
-    ctx.clear();
-    ctx.advance(HOUR);
-    await report(false);
-    expect(ctx.sent()).toEqual(['🔴 Світло зникло о 11:31\nСвітло було: 1 год']);
+  it('points out a missing, misspelled or broken changed_at', async () => {
+    await outageThenTest();
+    await heartbeat(true, undefined, { charged_at: 1 });
+    await heartbeat(true, '{v=powerTime}');
+    await handleReport(ctx, { charging: false, ts: ctx.now(), battery: 98 }, 'event', { charging: false });
+    const [typo, broken, event] = ctx.dm();
+    expect(typo).toContain('changed_at: немає поля (є «charged_at» — опечатка?)');
+    expect(typo).toContain("→ світло з'явилось о 13:00:00 (приблизно — без придатного changed_at)");
+    expect(broken).toContain('changed_at: не розпізнано або пізніше за ts — «{v=powerTime}»');
+    expect(event).toBe('🧪 Подія живлення · 13:00:00\nЗарядка: немає · 🔋 98%\nts: 13:00:00\n→ без змін (світла немає і так)');
   });
 
-  it('reminds the owner after 1 hour and then every 3 hours', async () => {
-    await startTracking();
-    await command('/pause');
+  it('after /testStop the next heartbeat applies with the exact time from changed_at', async () => {
+    await outageThenTest();
+    const powerBack = ctx.now() - 5 * MIN; // 12:55, світло повернулось під час тесту
+    await command('/testStop');
+    expect(ctx.dm().at(-1)).toMatch(/^✅ Тестовий режим вимкнено/);
     ctx.clear();
-    const remindersAt: number[] = [];
-    for (let t = 5; t <= 8 * 60; t += 5) {
-      ctx.setNow(T0 + t * MIN);
+    expect(await heartbeat(true, powerBack / 1000)).toBe('changed');
+    expect(ctx.sent()).toEqual(["🟢 Світло з'явилось о 12:55\nСвітла не було: 1 год 55 хв"]);
+  });
+
+  it('does not mark the detector offline and reminds the owner about the test mode', async () => {
+    await outageThenTest();
+    const reminders: number[] = [];
+    for (let m = 5; m <= 8 * 60; m += 5) {
+      ctx.setNow(T0 + 3 * HOUR + m * MIN);
+      ctx.clear();
       await runCron(ctx);
-      if (ctx.dm().length > remindersAt.length) remindersAt.push(t);
+      if (ctx.dm().length) reminders.push(m);
     }
-    expect(remindersAt).toEqual([60, 240, 420]);
-    expect(ctx.sent()).toEqual([]);
-    expect(ctx.dm()[0]).toBe('⏸ Трекінг на паузі вже 1 год.\nКоли телефон знову буде на зарядці — /resume');
-  });
-
-  it('excludes the pause from statistics', async () => {
-    await startTracking();
-    ctx.advance(HOUR);
-    await report(false);
-    ctx.advance(30 * MIN);
-    await report(true);
-    ctx.advance(30 * MIN);
-    await command('/pause');
-    ctx.advance(HOUR);
-    await report(true, 'heartbeat');
-    await command('/resume');
-    ctx.clear();
-
-    await command('/stats');
-    const text = ctx.dm()[0]!;
-    // пауза не входить у відсоток: 1 год 30 хв світла з 2 год відстеженого часу
-    expect(text).toContain('💡 Світло було 75% часу');
-    expect(text).toContain('🔴 Без світла 30 хв, відключень: 1');
-    expect(text).toContain('⏸ На паузі: 1 год');
+    expect(reminders).toEqual([60, 240, 420]);
+    expect((await getState(ctx.db)).detector_offline).toBe(0);
   });
 });
 

@@ -1,5 +1,5 @@
-import { notify, type Ctx } from './env';
-import { formatDuration, formatTime } from './format';
+import { notify, notifyOwner, type Ctx } from './env';
+import { formatDuration, formatTime, localClock } from './format';
 import type { TrackedDtek } from './dtek';
 import { dtekForOutage, renderOff, type OffParts } from './outage-message';
 import { nextOutageLine, outageScheduleLine } from './schedule';
@@ -59,9 +59,21 @@ function phoneTime(value: unknown, now: number): number | null {
   return Math.round(t);
 }
 
-export type ReportResult = 'initialized' | 'changed' | 'blip' | 'unchanged' | 'stale' | 'paused';
+export type ReportResult = 'initialized' | 'changed' | 'blip' | 'unchanged' | 'stale' | 'paused' | 'test';
 
-export async function handleReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<ReportResult> {
+/** `raw` — тіло запиту як є: у тестовому режимі показуємо, що саме прислав макрос (опечатки в полях тощо) */
+export async function handleReport(
+  ctx: Ctx,
+  report: Report,
+  kind: ReportKind,
+  raw?: Record<string, unknown>,
+): Promise<ReportResult> {
+  const s = await getState(ctx.db);
+  if (s.test_since !== null) {
+    // Тестовий режим: нічого не пишемо в базу і не шлемо в канал — лише розбір запиту власнику
+    await notifyOwner(ctx, describeTestReport(ctx, s, report, kind, raw));
+    return 'test';
+  }
   const result = await applyReport(ctx, report, kind);
   if (result === 'initialized' || result === 'changed' || result === 'blip') {
     await inBackground(ctx, () => updatePinnedStatus(ctx));
@@ -200,4 +212,64 @@ async function eraseBlip(ctx: Ctx, s: State): Promise<boolean> {
       .bind(outer, prev.start_ts, prev.start_approx),
   ]);
   return true;
+}
+
+/** «13:05:12» за місцевим часом */
+function hms(ms: number, tz: string): string {
+  const t = localClock(ms, tz);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(t.hour)}:${p(new Date(ms).getUTCMinutes())}:${p(new Date(ms).getUTCSeconds())}`;
+}
+
+/**
+ * Лог запиту в тестовому режимі: що прислав телефон і що сервер зробив би (без жодних змін у базі).
+ * Логіка передбачення повторює applyReport/eraseBlip у спрощеному вигляді.
+ */
+export function describeTestReport(
+  ctx: Ctx,
+  s: State,
+  r: Report,
+  kind: ReportKind,
+  raw?: Record<string, unknown>,
+): string {
+  const tz = ctx.env.TIMEZONE;
+  const lines = [
+    `🧪 ${kind === 'event' ? 'Подія живлення' : 'Heartbeat'} · ${hms(ctx.now(), tz)}`,
+    `Зарядка: ${r.charging ? 'є' : 'немає'}${r.battery !== null ? ` · 🔋 ${r.battery}%` : ''}`,
+    `ts: ${hms(r.ts, tz)}`,
+  ];
+
+  if (kind === 'heartbeat') {
+    const rawChanged = raw?.changed_at;
+    if (rawChanged === undefined) {
+      const typo = raw && Object.keys(raw).find((k) => k !== 'changed_at' && /^ch.*_at$/.test(k));
+      lines.push(`changed_at: немає поля${typo ? ` (є «${typo}» — опечатка?)` : ''}`);
+    } else if (r.changedAt == null) {
+      lines.push(`changed_at: не розпізнано або пізніше за ts — «${String(rawChanged)}»`);
+    } else {
+      lines.push(`changed_at: ${hms(r.changedAt, tz)}`);
+    }
+  }
+
+  lines.push(predict(ctx, s, r, kind));
+  return lines.join('\n');
+}
+
+function predict(ctx: Ctx, s: State, r: Report, kind: ReportKind): string {
+  const tz = ctx.env.TIMEZONE;
+  const word = (m: Mode) => (m === 'on' ? 'світло є' : 'світла немає');
+  if (s.phone_ts !== null && r.ts <= s.phone_ts) return '→ застарілий запит (не новіший за останній звіт) — проігнорував би';
+  const want: Mode = r.charging ? 'on' : 'off';
+  if (s.mode === null || s.mode_since === null) return `→ почав би трекінг: ${word(want)}`;
+  if (s.mode === want) return `→ без змін (${word(want)} і так)`;
+
+  const changedAt =
+    r.changedAt != null && r.changedAt > (s.phone_ts ?? 0) && r.changedAt >= s.mode_since ? r.changedAt : null;
+  const at = changedAt ?? Math.max(r.ts, s.mode_since);
+  const what = want === 'on' ? "світло з'явилось" : 'світло зникло';
+  const blipMax = Number(ctx.env.BLIP_MAX_MIN || 5) * 60_000;
+  if (at - s.mode_since < blipMax) return `→ ${what} о ${hms(at, tz)} — блимання (< 5 хв), стер би його`;
+  const how =
+    kind === 'event' ? 'точно' : changedAt !== null ? 'точно, з changed_at' : 'приблизно — без придатного changed_at';
+  return `→ ${what} о ${hms(at, tz)} (${how})`;
 }

@@ -1,17 +1,17 @@
 import { notifyOwner, type Ctx } from './env';
 import { formatDuration, formatTime } from './format';
-import { getState, switchMode, updateState } from './state';
+import { getState, updateState } from './state';
 import { fetchAddressOutage, fetchStreet, fetchStreets, findHouseKey, groupOf, toOutage, type DtekOutage } from './dtek';
 import { describeGroup, fetchGroup, loadConfiguredGroup, normalizeGroupKey } from './schedule';
 import { statsText } from './stats';
 import { inBackground, updatePinnedStatus } from './status-message';
-import { userName, type TgChat, type TgMessage, type TgUpdate, type TgUser } from './telegram';
+import { type TgChat, type TgMessage, type TgUpdate, type TgUser } from './telegram';
 
 const COMMANDS = [
   { command: 'status', description: 'Що зараз зі світлом' },
   { command: 'stats', description: 'Статистика: 7 днів і 12 місяців' },
-  { command: 'pause', description: 'Пауза: не стежити і не писати' },
-  { command: 'resume', description: 'Відновити трекінг' },
+  { command: 'teststart', description: 'Тест макросів: запити телефона не пишуться, а приходять сюди' },
+  { command: 'teststop', description: 'Вимкнути тестовий режим' },
   { command: 'address', description: 'Адреса для даних ДТЕК, напр. /address вул. Хрещатик, 1' },
   { command: 'queue', description: 'Черга для графіка відключень, напр. /queue 20.1' },
   { command: 'help', description: 'Список команд' },
@@ -56,12 +56,10 @@ export async function handleUpdate(ctx: Ctx, update: TgUpdate): Promise<void> {
       return reply(await statusText(ctx));
     case 'stats':
       return notifyOwner(ctx, await statsText(ctx), { html: true });
-    case 'pause':
-      await reply(await pause(ctx, msg.from!));
-      return inBackground(ctx, () => updatePinnedStatus(ctx));
-    case 'resume':
-      await reply(await resume(ctx));
-      return inBackground(ctx, () => updatePinnedStatus(ctx));
+    case 'teststart':
+      return reply(await testStart(ctx));
+    case 'teststop':
+      return reply(await testStop(ctx));
     case 'address':
       return reply(await address(ctx, arg));
     case 'queue':
@@ -256,33 +254,31 @@ async function statusText(ctx: Ctx): Promise<string> {
   return lines.join('\n');
 }
 
-async function pause(ctx: Ctx, by: TgUser): Promise<string> {
+/**
+ * Тестовий режим: стан і поточне відключення не чіпаємо, запити телефона не застосовуються —
+ * лише дублюються власнику з розбором. Після /testStop перший heartbeat (з changed_at) відновить стан.
+ */
+async function testStart(ctx: Ctx): Promise<string> {
   const now = ctx.now();
   const s = await getState(ctx.db);
-  if (s.mode === 'paused') {
-    return `⏸ Трекінг уже на паузі з ${formatTime(s.mode_since ?? now, ctx.env.TIMEZONE, now)}`;
-  }
-  await switchMode(ctx.db, 'paused', now, { pausedBy: userName(by) });
+  if (s.test_since !== null) return `🧪 Тестовий режим уже увімкнено з ${formatTime(s.test_since, ctx.env.TIMEZONE, now)}`;
+  await updateState(ctx.db, { test_since: now, test_reminded_at: null });
   return (
-    '⏸ Трекінг на паузі: відключення не записуються, сповіщень не буде.\n' +
-    'Можна відключати телефон. Коли він знову буде на зарядці — /resume'
+    '🧪 Тестовий режим увімкнено.\n' +
+    'Запити телефона не записуються і не йдуть у канал — я пересилатиму їх сюди з розбором. ' +
+    'Поточний стан і відключення не змінюються.\nВимкнути: /testStop'
   );
 }
 
-async function resume(ctx: Ctx): Promise<string> {
+async function testStop(ctx: Ctx): Promise<string> {
   const now = ctx.now();
   const s = await getState(ctx.db);
-  if (s.mode !== 'paused' || s.mode_since === null) return '▶️ Трекінг і так працює';
-  if (s.phone_charging !== 1) {
-    return '🔌 Телефон зараз не на зарядці. Підключи його і повтори /resume';
-  }
-  await switchMode(ctx.db, 'on', now);
-  const lines = [`▶️ Трекінг відновлено (пауза тривала ${formatDuration(now - s.mode_since)}). Світло є 🟢`];
-  const offlineAfter = Number(ctx.env.OFFLINE_AFTER_MIN || 45) * 60_000;
-  if (s.last_seen === null || now - s.last_seen > offlineAfter) {
-    lines.push("⚠️ Але телефон давно не виходив на зв'язок, перевір MacroDroid");
-  }
-  return lines.join('\n');
+  if (s.test_since === null) return 'Тестовий режим і так вимкнено';
+  await updateState(ctx.db, { test_since: null, test_reminded_at: null });
+  return (
+    `✅ Тестовий режим вимкнено (тривав ${formatDuration(now - s.test_since)}).\n` +
+    'Наступний запит телефона оновить стан як звичайно; heartbeat із changed_at — з точним часом зміни.'
+  );
 }
 
 async function queue(ctx: Ctx, arg: string): Promise<string> {
