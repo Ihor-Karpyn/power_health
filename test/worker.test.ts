@@ -158,7 +158,7 @@ describe('power events', () => {
     // подія «зарядку відключено» загубилась, heartbeat каже: не заряджається
     expect(await report(false, 'heartbeat')).toBe('changed');
     expect(ctx.sent()).toEqual([
-      '🔴 Світло зникло приблизно між 10:15 і 10:30\nСвітло було: ≈ 30 хв\nℹ️ Подія з телефона не дійшла, стан відновлено з heartbeat',
+      '🔴 Світло зникло о 10:30\nСвітло було: ≈ 30 хв\nℹ️ Подія з телефона не дійшла — це час, коли телефон про неї повідомив',
     ]);
   });
 
@@ -181,7 +181,7 @@ describe('power events', () => {
     ctx.advance(15 * MIN);
     // подія «відключено» загубилась; changed_at вказує на старіший момент — не віримо, оцінюємо як раніше
     await handleReport(ctx, { charging: false, ts: ctx.now(), battery: 70, changedAt: T0 + 5 * MIN }, 'heartbeat');
-    expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло приблизно між 10:15 і 10:30/);
+    expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло о 10:30\n/);
   });
 
   it('stays quiet when a heartbeat confirms the current state', async () => {

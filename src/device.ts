@@ -123,18 +123,15 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
     await switchMode(db, want, at, { approx: !exact });
 
     const tz = env.TIMEZONE;
-    const windowFrom = Math.max(s.phone_ts ?? s.mode_since, s.mode_since);
-    // Детектор був офлайн — показуємо час, коли він повернувся (а не вікно «між … і …» на кілька годин)
-    const when =
-      exact || wasOffline
-        ? `о ${formatTime(at, tz, now)}`
-        : `приблизно між ${formatTime(windowFrom, tz, now)} і ${formatTime(at, tz, now)}`;
+    // Завжди один момент, ніколи не інтервал «між … і …» (рішення користувача): точний час зміни (подія або
+    // changed_at), а якщо його немає — час, коли телефон повідомив про зміну
+    const when = `о ${formatTime(at, tz, now)}`;
     const approx = !exact || s.mode_since_approx === 1 ? '≈ ' : '';
     const notes = exact
       ? []
       : wasOffline
         ? ['ℹ️ Детектор був без зв\'язку, тож це час, коли він повернувся']
-        : ['ℹ️ Подія з телефона не дійшла, стан відновлено з heartbeat'];
+        : ['ℹ️ Подія з телефона не дійшла — це час, коли телефон про неї повідомив'];
     const duration = `${approx}${formatDuration(at - s.mode_since)}`;
 
     if (want === 'off') {
