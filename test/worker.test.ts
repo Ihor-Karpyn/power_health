@@ -329,6 +329,68 @@ describe('short blips', () => {
   });
 });
 
+describe('macro scenarios: blips + changed_at', () => {
+  /** Подія «Подія живлення»: ts = момент зміни (= powerTime) */
+  const event = (charging: boolean, at: number) => handleReport(ctx, { charging, ts: at, battery: 80 }, 'event');
+  /** Heartbeat: ts = момент відправки, changed_at = powerTime */
+  const heartbeat = (charging: boolean, at: number, powerTime: number | null) =>
+    handleReport(ctx, { charging, ts: at, battery: 80, changedAt: powerTime }, 'heartbeat');
+  const at = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 10, 5, hh - 2, mm, ss); // Київ (UTC+2)
+
+  beforeEach(async () => {
+    await activateChannel();
+    ctx.setNow(at(8, 0));
+    await heartbeat(true, at(8, 0), null); // світло є з 08:00
+    ctx.setNow(at(9, 0));
+    await event(false, at(9, 0)); // відключення з 09:00, подія дійшла
+    ctx.clear();
+  });
+
+  it('short light during an outage, "off" event lost: heartbeat changed_at turns it into an erased blip', async () => {
+    ctx.setNow(at(13, 30));
+    await event(true, at(13, 30)); // «з'явилось» дійшло
+    ctx.clear();
+    // о 13:32 знову зникло, подія не дійшла; heartbeat о 13:45 приносить changed_at = 13:32
+    ctx.setNow(at(13, 45));
+    expect(await heartbeat(false, at(13, 45), at(13, 32))).toBe('blip');
+    expect(ctx.calls.some((c) => c.method === 'deleteMessage')).toBe(true); // «з'явилось» видалено
+    expect(ctx.sent()).toEqual([]);
+    expect(await getState(ctx.db)).toMatchObject({ mode: 'off', mode_since: at(9, 0) });
+  });
+
+  it('flip while offline (both events lost): nothing is sent, the outage just continues', async () => {
+    // 13:30 з'явилось, 13:32 зникло — обидві події не дійшли; мережа о 13:40
+    ctx.setNow(at(13, 40));
+    expect(await heartbeat(false, at(13, 40), at(13, 32))).toBe('unchanged');
+    expect(ctx.sent()).toEqual([]);
+  });
+
+  it('heartbeat (network back) races ahead of the power event: one exact message, the event is a no-op', async () => {
+    ctx.setNow(at(13, 30, 5));
+    await heartbeat(true, at(13, 30, 5), at(13, 30)); // прийшов першим
+    expect(await event(true, at(13, 30))).toBe('stale'); // запізніла подія — ігнор
+    expect(ctx.sent()).toEqual(["🟢 Світло з'явилось о 13:30\nСвітла не було: 4 год 30 хв"]);
+  });
+
+  it('changed_at of a change the server already knows (event delivered) is ignored', async () => {
+    ctx.setNow(at(10, 0));
+    // heartbeat через годину: стан той самий, changed_at = 09:00 — ні повідомлень, ні змін
+    expect(await heartbeat(false, at(10, 0), at(9, 0))).toBe('unchanged');
+    expect(ctx.sent()).toEqual([]);
+  });
+
+  it('known limitation: two lost changes + boot on the charger give the time of the last lost change', async () => {
+    // 09:30 heartbeat дійшов. 13:30 з'явилось і 13:35 знову зникло — обидві події загубились (немає мережі);
+    // телефон розрядився і ввімкнувся о 16:00 вже на зарядці: «підключено» не спрацювало, powerTime = 13:35
+    ctx.setNow(at(9, 30));
+    await heartbeat(false, at(9, 30), at(9, 0));
+    ctx.clear();
+    ctx.setNow(at(16, 0));
+    await heartbeat(true, at(16, 0), at(13, 35));
+    expect(ctx.sent()[0]).toMatch(/^🟢 Світло з'явилось о 13:35/); // насправді — близько 16:00
+  });
+});
+
 describe('detector watchdog (cron)', () => {
   it('marks the detector offline after 45 min of silence without sending messages', async () => {
     await startTracking();
