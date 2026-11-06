@@ -1,4 +1,4 @@
-import { notify, type Ctx } from './env';
+import { notify, notifyOwner, type Ctx } from './env';
 import { formatDuration, formatTime } from './format';
 import type { TrackedDtek } from './dtek';
 import { dtekForOutage, renderOff, type OffParts } from './outage-message';
@@ -58,6 +58,9 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
   const { db, env } = ctx;
   const now = ctx.now();
   const s = await getState(db);
+  // Телефон довго мовчав (розрядився, не було мережі) — тоді точного моменту зміни не знаємо
+  const offlineAfter = Number(env.OFFLINE_AFTER_MIN || 45) * 60_000;
+  const wasOffline = s.detector_offline === 1 || (s.last_seen !== null && now - s.last_seen > offlineAfter);
 
   // Повтори тієї самої події та запити, що прийшли не по порядку, стан не змінюють
   const fresh = s.phone_ts === null || report.ts > s.phone_ts;
@@ -70,7 +73,7 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
   await updateState(db, fields);
 
   if (s.detector_offline && s.last_seen !== null) {
-    await notify(ctx, `✅ Детектор знову на зв'язку (мовчав ${formatDuration(now - s.last_seen)})`);
+    await notifyOwner(ctx, `✅ Детектор знову на зв'язку (мовчав ${formatDuration(now - s.last_seen)})`);
   }
 
   let result: ReportResult;
@@ -81,7 +84,7 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
     result = 'paused';
   } else if (s.mode === null || s.mode_since === null) {
     await switchMode(db, want, report.ts, { approx: true });
-    await notify(ctx, `📡 Детектор підключено. Зараз ${want === 'on' ? 'світло є 🟢' : 'світла немає 🔴'}`);
+    await notifyOwner(ctx, `📡 Детектор підключено. Зараз ${want === 'on' ? 'світло є 🟢' : 'світла немає 🔴'}`);
     result = 'initialized';
   } else if (s.mode !== want) {
     const exact = kind === 'event';
@@ -94,11 +97,17 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
 
     const tz = env.TIMEZONE;
     const windowFrom = Math.max(s.phone_ts ?? s.mode_since, s.mode_since);
-    const when = exact
-      ? `о ${formatTime(at, tz, now)}`
-      : `приблизно між ${formatTime(windowFrom, tz, now)} і ${formatTime(at, tz, now)}`;
+    // Детектор був офлайн — показуємо час, коли він повернувся (а не вікно «між … і …» на кілька годин)
+    const when =
+      exact || wasOffline
+        ? `о ${formatTime(at, tz, now)}`
+        : `приблизно між ${formatTime(windowFrom, tz, now)} і ${formatTime(at, tz, now)}`;
     const approx = !exact || s.mode_since_approx === 1 ? '≈ ' : '';
-    const notes = exact ? [] : ['ℹ️ Подія з телефона не дійшла, стан відновлено з heartbeat'];
+    const notes = exact
+      ? []
+      : wasOffline
+        ? ['ℹ️ Детектор був без зв\'язку, тож це час, коли він повернувся']
+        : ['ℹ️ Подія з телефона не дійшла, стан відновлено з heartbeat'];
     const duration = `${approx}${formatDuration(at - s.mode_since)}`;
 
     if (want === 'off') {

@@ -33,7 +33,8 @@ export async function runCron(ctx: Ctx): Promise<void> {
       s.mode === 'off'
         ? 'Світла немає, тож телефон міг розрядитись.'
         : 'Перевір телефон: можливо, він вимкнувся або MacroDroid зупинився.';
-    await notify(
+    // Власнику в особисті, не в канал: у каналі є підписники, їм це не потрібно
+    await notifyOwner(
       ctx,
       `⚠️ Детектор не на зв'язку вже ${formatDuration(now - s.last_seen)} ` +
         `(останній сигнал о ${formatTime(s.last_seen, env.TIMEZONE, now)})\n${hint}`,

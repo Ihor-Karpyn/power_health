@@ -102,7 +102,8 @@ describe('power events', () => {
   it('announces the initial state', async () => {
     await activateChannel();
     expect(await report(true, 'heartbeat')).toBe('initialized');
-    expect(ctx.sent()).toEqual(['📡 Детектор підключено. Зараз світло є 🟢']);
+    expect(ctx.dm()).toEqual(['📡 Детектор підключено. Зараз світло є 🟢']); // службове — власнику
+    expect(ctx.sent()).toEqual([]);
   });
 
   it('reports outages with exact time and duration', async () => {
@@ -245,15 +246,18 @@ describe('detector watchdog (cron)', () => {
     await runCron(ctx);
     ctx.advance(5 * MIN);
     await runCron(ctx);
-    expect(ctx.sent()).toHaveLength(1);
-    expect(ctx.sent()[0]).toMatch(/^⚠️ Детектор не на зв'язку вже 50 хв \(останній сигнал о 10:00\)/);
+    // власнику в особисті, не в канал з підписниками
+    expect(ctx.sent()).toEqual([]);
+    expect(ctx.dm()).toHaveLength(1);
+    expect(ctx.dm()[0]).toMatch(/^⚠️ Детектор не на зв'язку вже 50 хв \(останній сигнал о 10:00\)/);
 
     ctx.clear();
     await report(true, 'heartbeat');
-    expect(ctx.sent()).toEqual(["✅ Детектор знову на зв'язку (мовчав 55 хв)"]);
+    expect(ctx.dm()).toEqual(["✅ Детектор знову на зв'язку (мовчав 55 хв)"]);
+    expect(ctx.sent()).toEqual([]);
   });
 
-  it('a phone that died during an outage reports the return of power approximately', async () => {
+  it('a phone that died during an outage reports power back at the time it reappeared', async () => {
     await startTracking();
     ctx.advance(HOUR);
     await report(false);
@@ -262,9 +266,11 @@ describe('detector watchdog (cron)', () => {
     ctx.clear();
     ctx.advance(2 * HOUR);
     await report(true, 'heartbeat'); // увімкнувся після появи світла
-    const [back, power] = ctx.sent();
-    expect(back).toMatch(/^✅ Детектор знову на зв'язку/);
-    expect(power).toMatch(/^🟢 Світло з'явилось приблизно між 11:00 і 23:00\nСвітла не було: ≈ 12 год/);
+    expect(ctx.dm()[0]).toMatch(/^✅ Детектор знову на зв'язку/);
+    // не «приблизно між 11:00 і 23:00», а час, коли детектор повернувся
+    expect(ctx.sent()).toEqual([
+      "🟢 Світло з'явилось о 23:00\nСвітла не було: ≈ 12 год\nℹ️ Детектор був без зв'язку, тож це час, коли він повернувся",
+    ]);
   });
 });
 
@@ -273,9 +279,9 @@ describe('channel activation', () => {
     await report(true, 'heartbeat');
     ctx.advance(HOUR);
     await report(false);
-    expect(ctx.calls).toEqual([]);
+    expect(ctx.sent()).toEqual([]); // у канал — нічого (службове «детектор підключено» — власнику)
     await command('/status');
-    expect(ctx.dm()[0]).toContain('📢 Канал не активовано');
+    expect(ctx.dm().at(-1)).toContain('📢 Канал не активовано');
   });
 
   it('tells the owner to post /activate in the channel after being added', async () => {
@@ -300,7 +306,9 @@ describe('channel activation', () => {
 
     ctx.clear();
     await report(true, 'heartbeat');
-    expect(ctx.sent()).toEqual(['📡 Детектор підключено. Зараз світло є 🟢']);
+    ctx.advance(HOUR);
+    await report(false);
+    expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло/); // сповіщення тепер ідуть у канал
   });
 
   it('activates an anonymous post only if the owner created the channel', async () => {
