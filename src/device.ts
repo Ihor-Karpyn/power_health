@@ -13,6 +13,11 @@ export interface Report {
   /** Час на телефоні, коли стан зафіксовано (ms) */
   ts: number;
   battery: number | null;
+  /**
+   * Коли на телефоні востаннє змінилась зарядка (ms) — глобальна змінна MacroDroid `power_ts`, яку heartbeat
+   * надсилає як `changed_at`. Дає точний час зміни, навіть якщо сама подія не дійшла (не було інтернету).
+   */
+  changedAt?: number | null;
 }
 
 const TRUE = new Set(['true', '1', 'on', 'yes', 'charging']);
@@ -31,17 +36,27 @@ export function parseReport(body: unknown, now: number): Report | { error: strin
   else return { error: '"charging" must be true or false' };
 
   // Невалідний ts (наприклад, magic text не підставився) → беремо час сервера
-  let ts = Number(b.ts);
-  if (!Number.isFinite(ts) || ts <= 0) ts = now;
-  else if (ts < 1e11) ts *= 1000; // секунди → мс
-  if (ts > now + MAX_CLOCK_SKEW) ts = now;
+  const ts = phoneTime(b.ts, now) ?? now;
+  // changed_at необов'язковий: невалідний або пізніший за ts — ігноруємо
+  const changed = phoneTime(b.changed_at, now);
+  const changedAt = changed !== null && changed <= ts ? changed : null;
 
   const battery = Number.parseInt(String(b.battery), 10);
   return {
     charging,
-    ts: Math.round(ts),
+    ts,
     battery: Number.isFinite(battery) && battery >= 0 && battery <= 100 ? battery : null,
+    changedAt,
   };
+}
+
+/** Час з телефона: секунди або мс; невалідний або з майбутнього → null */
+function phoneTime(value: unknown, now: number): number | null {
+  let t = Number(value);
+  if (value === undefined || value === null || value === '' || !Number.isFinite(t) || t <= 0) return null;
+  if (t < 1e11) t *= 1000; // секунди → мс
+  if (t > now + MAX_CLOCK_SKEW) return null;
+  return Math.round(t);
 }
 
 export type ReportResult = 'initialized' | 'changed' | 'blip' | 'unchanged' | 'stale' | 'paused';
@@ -82,8 +97,13 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
     await switchMode(db, want, report.ts, { approx: true });
     result = 'initialized';
   } else if (s.mode !== want) {
-    const exact = kind === 'event';
-    const at = Math.max(report.ts, s.mode_since);
+    // Heartbeat приніс час зміни з телефона, новіший за все, що ми знаємо, — це точний момент, а не оцінка
+    const changedAt =
+      report.changedAt != null && report.changedAt > (s.phone_ts ?? 0) && report.changedAt >= s.mode_since
+        ? report.changedAt
+        : null;
+    const exact = kind === 'event' || changedAt !== null;
+    const at = changedAt ?? Math.max(report.ts, s.mode_since);
     const blipMax = Number(env.BLIP_MAX_MIN || 5) * 60_000;
     if (want === 'on' && at - s.mode_since < blipMax && (await eraseBlip(ctx, s))) {
       return 'blip';

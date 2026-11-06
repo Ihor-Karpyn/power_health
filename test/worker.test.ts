@@ -78,11 +78,13 @@ describe('parseReport', () => {
       charging: true,
       ts: now - 60_000,
       battery: null,
+      changedAt: null,
     });
     expect(parseReport({ charging: false, ts: now - 1000, battery: '57' }, now)).toEqual({
       charging: false,
       ts: now - 1000,
       battery: 57,
+      changedAt: null,
     });
   });
 
@@ -90,6 +92,12 @@ describe('parseReport', () => {
     expect(parseReport({ charging: 1, ts: '{system_time}' }, now)).toMatchObject({ ts: now });
     expect(parseReport({ charging: 1 }, now)).toMatchObject({ ts: now });
     expect(parseReport({ charging: 1, ts: now + HOUR }, now)).toMatchObject({ ts: now });
+  });
+
+  it('reads changed_at and drops invalid or later-than-ts values', () => {
+    expect(parseReport({ charging: true, ts: now / 1000, changed_at: now / 1000 - 300 }, now)).toMatchObject({ changedAt: now - 300_000 });
+    expect(parseReport({ charging: true, ts: now / 1000, changed_at: '{v=power_ts}' }, now)).toMatchObject({ changedAt: null });
+    expect(parseReport({ charging: true, ts: now / 1000, changed_at: now / 1000 + 60 }, now)).toMatchObject({ changedAt: null });
   });
 
   it('rejects an unknown charging value', () => {
@@ -152,6 +160,28 @@ describe('power events', () => {
     expect(ctx.sent()).toEqual([
       '🔴 Світло зникло приблизно між 10:15 і 10:30\nСвітло було: ≈ 30 хв\nℹ️ Подія з телефона не дійшла, стан відновлено з heartbeat',
     ]);
+  });
+
+  it('uses changed_at from the heartbeat when the event itself was lost', async () => {
+    await startTracking();
+    ctx.advance(HOUR);
+    await report(false); // 11:00 світло зникло, подія дійшла
+    ctx.clear();
+    // 13:30 світло з'явилось, але інтернету не було — подія не дійшла; мережа повернулась о 13:37
+    const powerBack = ctx.now() + 2.5 * HOUR;
+    ctx.setNow(powerBack + 7 * MIN);
+    expect(await handleReport(ctx, { charging: true, ts: ctx.now(), battery: 70, changedAt: powerBack }, 'heartbeat')).toBe('changed');
+    expect(ctx.sent()).toEqual(["🟢 Світло з'явилось о 13:30\nСвітла не було: 2 год 30 хв"]);
+  });
+
+  it('ignores changed_at that is not newer than what the server knows', async () => {
+    await startTracking();
+    ctx.advance(15 * MIN);
+    await report(true, 'heartbeat'); // phone_ts = 10:15
+    ctx.advance(15 * MIN);
+    // подія «відключено» загубилась; changed_at вказує на старіший момент — не віримо, оцінюємо як раніше
+    await handleReport(ctx, { charging: false, ts: ctx.now(), battery: 70, changedAt: T0 + 5 * MIN }, 'heartbeat');
+    expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло приблизно між 10:15 і 10:30/);
   });
 
   it('stays quiet when a heartbeat confirms the current state', async () => {
