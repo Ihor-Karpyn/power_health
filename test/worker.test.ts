@@ -257,6 +257,69 @@ describe('short blips', () => {
     expect(await report(true)).toBe('blip');
   });
 
+  describe('light that came back only briefly', () => {
+    /** Відключення з 11:00; о 15:00 світло з'являється на `minutes` хв і знову зникає */
+    async function briefLight(minutes: number) {
+      await startTracking();
+      ctx.advance(HOUR);
+      await report(false); // 11:00
+      const offMessageId = (await getState(ctx.db)).off_message_id;
+      ctx.advance(4 * HOUR);
+      await report(true); // 15:00
+      const onMessageId = (await getState(ctx.db)).on_message_id;
+      ctx.clear();
+      ctx.advance(minutes * MIN);
+      const result = await report(false);
+      return { result, offMessageId, onMessageId };
+    }
+
+    it('erases it: deletes "light is back", sends nothing, the outage continues', async () => {
+      const { result, offMessageId, onMessageId } = await briefLight(3);
+      expect(result).toBe('blip');
+      expect(ctx.calls.find((c) => c.method === 'deleteMessage')?.params).toEqual({ chat_id: CHANNEL.id, message_id: onMessageId });
+      expect(ctx.sent()).toEqual([]);
+
+      const s = await getState(ctx.db);
+      expect(s).toMatchObject({ mode: 'off', mode_since: T0 + HOUR, on_message_id: null, off_message_id: offMessageId });
+
+      // відключення одне, без «дірки» о 15:00
+      ctx.advance(HOUR);
+      ctx.clear();
+      await command('/stats');
+      expect(ctx.dm()[0]).toContain('🔴 Без світла 5 год 3 хв, відключень: 1');
+
+      // і коли світло справді повернеться — тривалість від 11:00
+      ctx.clear();
+      await report(true);
+      expect(ctx.sent()[0]).toBe("🟢 Світло з'явилось о 16:03\nСвітла не було: 5 год 3 хв");
+    });
+
+    it('keeps it when the light stayed for 5 minutes or more', async () => {
+      const { result } = await briefLight(5);
+      expect(result).toBe('changed');
+      expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло о 15:05\nСвітло було: 5 хв/);
+    });
+
+    it('keeps it when the message cannot be deleted', async () => {
+      ctx.failing.add('deleteMessage');
+      const { result } = await briefLight(2);
+      expect(result).toBe('changed');
+      expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло о 15:02/);
+    });
+
+    it('does not erase the first minutes after /resume', async () => {
+      await startTracking();
+      await command('/pause');
+      ctx.advance(10 * MIN);
+      await report(true);
+      await command('/resume'); // перед «світло є» — пауза, а не відключення
+      ctx.advance(2 * MIN);
+      ctx.clear();
+      expect(await report(false)).toBe('changed');
+      expect(ctx.sent()[0]).toMatch(/^🔴 Світло зникло/);
+    });
+  });
+
   it('keeps a short outage when there was no "light on" period before it', async () => {
     await activateChannel();
     await report(false, 'heartbeat'); // детектор підключили, коли світла не було

@@ -105,7 +105,7 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
     const exact = kind === 'event' || changedAt !== null;
     const at = changedAt ?? Math.max(report.ts, s.mode_since);
     const blipMax = Number(env.BLIP_MAX_MIN || 5) * 60_000;
-    if (want === 'on' && at - s.mode_since < blipMax && (await eraseBlip(ctx, s))) {
+    if (at - s.mode_since < blipMax && (await eraseBlip(ctx, s))) {
       return 'blip';
     }
     await switchMode(db, want, at, { approx: !exact });
@@ -133,6 +133,8 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
       await updateState(db, {
         off_message_chat_id: sent?.chat_id ?? null,
         off_message_id: sent?.message_id ?? null,
+        on_message_chat_id: null,
+        on_message_id: null,
         off_parts: JSON.stringify(parts),
         off_dtek: dtek ? JSON.stringify(dtek) : null,
       });
@@ -143,8 +145,9 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
       const promised = s.off_dtek ? (JSON.parse(s.off_dtek) as TrackedDtek) : null;
       if (promised?.end) lines.push(`🕦 ДТЕК обіцяв до ${formatTime(promised.end, tz, now)}`);
       lines.push(...notes);
-      await notify(ctx, lines.join('\n'));
-      await updateState(db, { off_message_chat_id: null, off_message_id: null, off_parts: null, off_dtek: null });
+      const sent = await notify(ctx, lines.join('\n'));
+      // off_* не чистимо: якщо світло знову зникне за кілька хвилин, відключення продовжиться з тим самим повідомленням
+      await updateState(db, { on_message_chat_id: sent?.chat_id ?? null, on_message_id: sent?.message_id ?? null });
     }
     result = 'changed';
   } else {
@@ -154,36 +157,47 @@ async function applyReport(ctx: Ctx, report: Report, kind: ReportKind): Promise<
 }
 
 /**
- * Коротке «блимання»: світло зникло і з'явилось за кілька хвилин.
- * Видаляємо «🔴 Світло зникло» з каналу і склеюємо відключення з попереднім періодом
- * «світло є», ніби його й не було. Повертає false, якщо стерти не вдалось —
- * тоді відключення обробляється як звичайне.
+ * Коротке «блимання» в будь-який бік — поточний період (s.mode) триває менше BLIP_MAX_MIN:
+ * - світло зникло й одразу з'явилось → видаляємо «🔴 Світло зникло», не пишемо «з'явилось»;
+ * - світло з'явилось і одразу зникло → видаляємо «🟢 Світло з'явилось», не пишемо «зникло».
+ * Короткий період прибираємо з історії, попередній продовжується, ніби нічого не було.
+ * Повертає false, якщо стерти не вдалось (немає попереднього періоду протилежного типу — напр. після
+ * паузи чи на старті, — або не вдалося видалити повідомлення) — тоді обробляємо як звичайну зміну.
  */
 async function eraseBlip(ctx: Ctx, s: State): Promise<boolean> {
   const { db } = ctx;
+  if (s.mode !== 'on' && s.mode !== 'off') return false;
+  const short = s.mode;
+  const outer = short === 'off' ? 'on' : 'off';
   const prev = await db
-    .prepare("SELECT id, start_ts, start_approx FROM periods WHERE kind = 'on' AND end_ts = ? ORDER BY id DESC LIMIT 1")
-    .bind(s.mode_since)
+    .prepare('SELECT id, start_ts, start_approx FROM periods WHERE kind = ? AND end_ts = ? ORDER BY id DESC LIMIT 1')
+    .bind(outer, s.mode_since)
     .first<{ id: number; start_ts: number; start_approx: number }>();
-  if (!prev) return false; // перед відключенням не було періоду «світло є» (наприклад, після паузи)
+  if (!prev) return false;
 
-  if (s.off_message_chat_id !== null && s.off_message_id !== null) {
+  const [chatId, messageId] =
+    short === 'off' ? [s.off_message_chat_id, s.off_message_id] : [s.on_message_chat_id, s.on_message_id];
+  if (chatId !== null && messageId !== null) {
     try {
-      await ctx.tg.call('deleteMessage', { chat_id: s.off_message_chat_id, message_id: s.off_message_id });
+      await ctx.tg.call('deleteMessage', { chat_id: chatId, message_id: messageId });
     } catch (err) {
-      console.error('could not delete the outage message, keeping the outage', err);
+      console.error('could not delete the blip message, keeping it as a normal change', err);
       return false;
     }
   }
 
+  // Стерли коротке відключення — його повідомлення більше немає; стерли коротке «світло є» — відключення
+  // продовжується, тож off_* (повідомлення, дані ДТЕК) лишаються.
+  const clear =
+    short === 'off'
+      ? 'off_message_chat_id = NULL, off_message_id = NULL, off_parts = NULL, off_dtek = NULL'
+      : 'on_message_chat_id = NULL, on_message_id = NULL';
   await db.batch([
-    db.prepare("DELETE FROM periods WHERE kind = 'off' AND end_ts IS NULL"),
+    db.prepare('DELETE FROM periods WHERE kind = ? AND end_ts IS NULL').bind(short),
     db.prepare('UPDATE periods SET end_ts = NULL, end_approx = 0 WHERE id = ?').bind(prev.id),
     db
-      .prepare(
-        "UPDATE state SET mode = 'on', mode_since = ?, mode_since_approx = ?, off_message_chat_id = NULL, off_message_id = NULL, off_parts = NULL, off_dtek = NULL WHERE id = 1",
-      )
-      .bind(prev.start_ts, prev.start_approx),
+      .prepare(`UPDATE state SET mode = ?, mode_since = ?, mode_since_approx = ?, ${clear} WHERE id = 1`)
+      .bind(outer, prev.start_ts, prev.start_approx),
   ]);
   return true;
 }
