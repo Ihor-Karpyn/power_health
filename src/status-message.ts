@@ -23,10 +23,6 @@ export async function renderStatus(ctx: Ctx, s: State, g: GroupInfo | null): Pro
   else if (s.mode === 'paused') lines.push('⏸ Трекінг на паузі');
   else lines.push('❔ Стан ще невідомий');
 
-  if (s.detector_offline && s.last_seen !== null) {
-    lines.push(`⚠️ Детектор не на зв'язку з ${formatTime(s.last_seen, tz, now)}`);
-  }
-
   if (s.mode === 'off') {
     const dtek = s.off_dtek ? (JSON.parse(s.off_dtek) as TrackedDtek) : null;
     const planned = g && !isEmergency(g) ? offIntervals(g).find((i) => i.start <= now && now < i.end) : undefined;
@@ -47,6 +43,15 @@ export async function renderStatus(ctx: Ctx, s: State, g: GroupInfo | null): Pro
     else lines.push('📅 Відключень за графіком не заплановано');
   }
 
+  // Унизу — стан детектора і заряд телефона (приходить з кожним heartbeat, раз на 15 хв)
+  if (s.last_seen !== null) {
+    const battery = s.battery !== null ? ` · 🔋 ${s.battery}%` : '';
+    lines.push(
+      s.detector_offline
+        ? `📱 Детектор не на зв'язку з ${formatTime(s.last_seen, tz, now)}${battery}`
+        : `📱 Детектор на зв'язку${battery}`,
+    );
+  }
   lines.push(`🕐 Оновлено ${formatTime(now, tz, now)}`);
   return lines.join('\n');
 }

@@ -964,17 +964,31 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       await updateStateForTest({ status_message_id: null }); // створене при старті трекінгу — перевіримо створення заново
       await cronAt(at(5, 10, 5));
       const created = ctx.calls.find((c) => c.method === 'sendMessage' && c.params.disable_notification)!;
-      expect(created.params.text).toBe('🟢 Світло є ≈ 5 хв (з 10:00)\n📅 Наступне відключення: 11:00–18:30\n🕐 Оновлено 10:05');
+      expect(created.params.text).toBe(
+        "🟢 Світло є ≈ 5 хв (з 10:00)\n📅 Наступне відключення: 11:00–18:30\n📱 Детектор на зв'язку · 🔋 80%\n🕐 Оновлено 10:05",
+      );
       expect(ctx.calls.find((c) => c.method === 'pinChatMessage')?.params).toMatchObject({ chat_id: CHANNEL.id, disable_notification: true });
 
       ctx.clear();
       ctx.setNow(at(5, 11, 3));
       await report(false);
-      expect(pinnedTexts()).toEqual(['🔴 Світла немає менше хвилини (з 11:03)\n📅 За графіком: до 18:30\n🕐 Оновлено 11:03']);
+      expect(pinnedTexts()).toEqual([
+        "🔴 Світла немає менше хвилини (з 11:03)\n📅 За графіком: до 18:30\n📱 Детектор на зв'язку · 🔋 80%\n🕐 Оновлено 11:03",
+      ]);
       expect(ctx.calls.filter((c) => c.method === 'sendMessage' && c.params.disable_notification)).toEqual([]); // редагується, не нове
 
       await cronAt(at(5, 11, 3)); // нічого не змінилось — не редагуємо
       expect(pinnedTexts()).toEqual([]);
+    });
+
+    it('shows an offline detector with its last battery level at the bottom', async () => {
+      await updateStateForTest({ detector_offline: 1, last_seen: at(5, 9, 40), battery: 23 });
+      ctx.setNow(at(5, 10, 30));
+      ctx.clear();
+      await runCron(ctx); // без cronAt: він позначив би телефон як «на зв'язку»
+      expect(pinnedTexts().at(-1)).toBe(
+        "🟢 Світло є ≈ 30 хв (з 10:00)\n📅 Наступне відключення: 11:00–18:30\n📱 Детектор не на зв'язку з 09:40 · 🔋 23%\n🕐 Оновлено 10:30",
+      );
     });
 
     it('is recreated when someone deletes it', async () => {
@@ -1011,7 +1025,9 @@ describe('channel extras: warnings, tomorrow schedule, pinned status', () => {
       ctx.setNow(at(5, 11, 3));
       await report(false);
       await cronAt(at(5, 11, 30));
-      expect(pinnedTexts().at(-1)).toBe('🔴 Світла немає 27 хв (з 11:03)\n🕦 ДТЕК: відновлення до 19:00\n🕐 Оновлено 11:30');
+      expect(pinnedTexts().at(-1)).toBe(
+        "🔴 Світла немає 27 хв (з 11:03)\n🕦 ДТЕК: відновлення до 19:00\n📱 Детектор на зв'язку · 🔋 80%\n🕐 Оновлено 11:30",
+      );
     });
   });
 
