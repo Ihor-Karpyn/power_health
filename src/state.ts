@@ -37,6 +37,8 @@ export interface State {
   /** Тестовий режим увімкнено (ms) — запити телефона не застосовуються */
   test_since: number | null;
   test_reminded_at: number | null;
+  /** Лінії будинку з записів ДТЕК, JSON-масив, напр. ["20.1","23.1"] */
+  house_lines: string | null;
 }
 
 export async function getState(db: D1Database): Promise<State> {

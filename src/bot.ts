@@ -1,7 +1,7 @@
 import { notifyOwner, type Ctx } from './env';
 import { formatDuration, formatTime } from './format';
 import { getState, updateState } from './state';
-import { fetchAddressOutage, fetchStreet, fetchStreets, findHouseKey, groupOf, lineOf, toOutage, type DtekOutage } from './dtek';
+import { fetchAddressOutage, fetchStreet, fetchStreets, findHouseKey, lineOf, linesOf, storedLines, toOutage, type DtekOutage } from './dtek';
 import { describeGroup, fetchGroup, loadConfiguredGroup, normalizeGroupKey } from './schedule';
 import { statsText } from './stats';
 import { inBackground, updatePinnedStatus } from './status-message';
@@ -241,6 +241,9 @@ async function statusText(ctx: Ctx): Promise<string> {
           ? `⚡️ ДТЕК: ${describeDtek(res.outage, now, tz)}`
           : '⚡️ ДТЕК: відключень за адресою немає',
     );
+    const known = storedLines((await getState(ctx.db)).house_lines);
+    const mine = lineOf(s.schedule_group);
+    if (known.length > 1) lines.push(`🏠 Будинок: лінії ${known.join(', ')} · твоя: ${mine ?? 'не вказана (/queue)'}`);
   }
   if (s.schedule_group) {
     const g = await loadConfiguredGroup(ctx);
@@ -346,12 +349,26 @@ async function address(ctx: Ctx, arg: string): Promise<string> {
     return `⛔ Будинку «${house}» на цій вулиці в ДТЕК немає.${similar.length ? ` Схожі: ${similar.join(', ')}` : ''}`;
   }
 
-  const fields: Parameters<typeof updateState>[1] = { dtek_street: street, dtek_house: key };
-  const group = groupOf(res.houses[key]);
+  // Нова адреса — лінії збираємо заново
+  const houseLines = linesOf(res.houses[key]);
+  const fields: Parameters<typeof updateState>[1] = {
+    dtek_street: street,
+    dtek_house: key,
+    house_lines: houseLines.length ? JSON.stringify(houseLines) : null,
+  };
+  const mine = lineOf(s.schedule_group);
   let groupNote = '';
-  if (group && !s.schedule_group) {
-    fields.schedule_group = `${ctx.env.SCHEDULE_OPERATOR || 'dtek-kem'}:${group}`;
-    groupNote = `\n📅 Черга ${group} — для графіка вона задана автоматично (/queue)`;
+  if (houseLines.length > 1) {
+    // Не вгадуємо: квартира може бути на будь-якій з ліній
+    groupNote =
+      mine && houseLines.includes(mine)
+        ? `\n🏠 У будинку кілька ліній: ${houseLines.join(', ')} · твоя (з /queue): ${mine}`
+        : `\n🏠 У будинку кілька ліній: ${houseLines.join(', ')}. Вкажи свою: ${houseLines.map((l) => `/queue ${l}`).join(' або ')}`;
+  } else if (houseLines.length === 1 && !s.schedule_group) {
+    fields.schedule_group = `${ctx.env.SCHEDULE_OPERATOR || 'dtek-kem'}:${houseLines[0]}`;
+    groupNote = `\n📅 Черга ${houseLines[0]} — для графіка вона задана автоматично (/queue)`;
+  } else if (houseLines.length === 1 && mine && mine !== houseLines[0]) {
+    groupNote = `\n⚠️ ДТЕК зараз показує для будинку лінію ${houseLines[0]}, а в /queue — ${mine}. Перевір, яка твоя`;
   }
   await updateState(ctx.db, fields);
   const outage = toOutage(res.houses[key], ctx.env.TIMEZONE);

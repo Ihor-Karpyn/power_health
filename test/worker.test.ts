@@ -940,7 +940,12 @@ describe('DTEK address data', () => {
         '12': lineHouse('GPV23.1', 'Стабілізаційне відключення', '11:03 05.11.2026', '15:00 05.11.2026'), // інша лінія
       };
       await startTracking();
-      await setAddress(); // черга 20.1 підставиться з першої групи будинку
+      ctx.groups['dtek-kem:20.1'] = { key: 'dtek-kem:20.1', state: 'on', class: 'planned', plan_status: 'applies', today: [] };
+      // у будинку дві лінії — /address не вгадує, лінію задаємо явно, як і в проді
+      expect(await setAddress()).toContain('🏠 У будинку кілька ліній: 20.1, 23.1. Вкажи свою: /queue 20.1 або /queue 23.1');
+      expect((await getState(ctx.db)).schedule_group).toBeNull();
+      await command('/queue 20.1');
+      ctx.clear();
     });
 
     it('takes the outage of houses on our line when the house record is empty', async () => {
@@ -949,6 +954,32 @@ describe('DTEK address data', () => {
       expect(ctx.sent()[0]).toBe(
         `🔴 Світло зникло о 11:03\nСвітло було: ≈ 1 год 3 хв\n⚡️ ДТЕК (лінія 20.1): ${REPAIR}\n🕦 Орієнтовне відновлення: до 12:50`,
       );
+    });
+
+    it("ignores the house record when it is about the other line and looks on ours", async () => {
+      // ДТЕК записав будинку відключення лінії 23.1, а ми на 20.1 (вимкнена з іншої причини)
+      ctx.dtekStreets[STREET]!['70/72'] = { ...house('Стабілізаційне відключення', '11:00 05.11.2026', '15:00 05.11.2026'), sub_type_reason: ['GPV23.1'] };
+      ctx.advance(63 * MIN);
+      await report(false);
+      expect(ctx.sent()[0]).toContain(`⚡️ ДТЕК (лінія 20.1): ${REPAIR}\n🕦 Орієнтовне відновлення: до 12:50`);
+      expect(ctx.sent()[0]).not.toContain('Стабілізаційне');
+    });
+
+    it('uses the house record when it is about our line', async () => {
+      ctx.dtekStreets[STREET]!['70/72'] = { ...house(STABILIZATION, '11:03 05.11.2026', '18:30 05.11.2026'), sub_type_reason: ['GPV20.1'] };
+      ctx.advance(63 * MIN);
+      await report(false);
+      expect(ctx.sent()[0]).toContain(`⚡️ ДТЕК: ${STABILIZATION}\n🕦 Орієнтовне відновлення: до 18:30`);
+    });
+
+    it('remembers all lines of the house and shows ours in /status', async () => {
+      await command('/status');
+      expect(ctx.dm()[0]).toContain('🏠 Будинок: лінії 20.1, 23.1 · твоя: 20.1');
+    });
+
+    it('/address on a two-line house keeps the line already chosen with /queue', async () => {
+      expect(await setAddress()).toContain('🏠 У будинку кілька ліній: 20.1, 23.1 · твоя (з /queue): 20.1');
+      expect((await getState(ctx.db)).schedule_group).toBe('dtek-kem:20.1');
     });
 
     it('does not claim "DTEK does not see the outage" in that case', async () => {

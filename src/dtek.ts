@@ -151,9 +151,22 @@ export function toOutage(raw: RawHouse | undefined, tz: string): DtekOutage | nu
   return { reason, start: parseDtekDate(raw!.start_date, tz), end: parseDtekDate(raw!.end_date, tz) };
 }
 
-/** "GPV20.1" з запису будинку → "20.1" */
-export function groupOf(raw: RawHouse | undefined): string | null {
-  return raw?.sub_type_reason?.map((g) => g.match(/(\d{1,2}\.\d)/)?.[1]).find(Boolean) ?? null;
+/** ["GPV20.1","GPV23.1"] з запису будинку → ["20.1","23.1"] */
+export function linesOf(raw: RawHouse | undefined): string[] {
+  return (raw?.sub_type_reason ?? []).map((g) => g.match(/(\d{1,2}\.\d)/)?.[1]).filter((g): g is string => !!g);
+}
+
+/** Збережені лінії будинку (state.house_lines) */
+export const storedLines = (houseLines: string | null): string[] => (houseLines ? (JSON.parse(houseLines) as string[]) : []);
+
+/** Додати до state.house_lines лінії, які щойно побачили (пише лише коли з'явилась нова) */
+async function rememberLines(ctx: Ctx, seen: string[]): Promise<void> {
+  if (!seen.length) return;
+  const row = await ctx.db.prepare('SELECT house_lines FROM state WHERE id = 1').first<{ house_lines: string | null }>();
+  const known = storedLines(row?.house_lines ?? null);
+  const all = [...new Set([...known, ...seen])].sort((a, b) => parseFloat(a) - parseFloat(b));
+  if (all.length === known.length) return;
+  await ctx.db.prepare('UPDATE state SET house_lines = ? WHERE id = 1').bind(JSON.stringify(all)).run();
 }
 
 export type ConfiguredOutage = { ok: true; outage: DtekOutage | null } | { ok: false };
@@ -164,8 +177,8 @@ export type ConfiguredOutage = { ok: true; outage: DtekOutage | null } | { ok: f
  *
  * Будинок може живитися від двох ліній у різних чергах (наш — GPV20.1 і GPV23.1). Коли вимкнена лише одна, запис
  * будинку лишається порожнім, хоча квартира на цій лінії без світла (реальний випадок: «Аварійні ремонтні роботи»
- * 06:08 у будинках вулиці на лінії 20.1, а запис нашого будинку порожній). Тоді беремо запис будинків цієї ж вулиці
- * на нашій лінії (`line` — черга з /queue): найчастіший серед них.
+ * 06:08 у будинках вулиці на лінії 20.1, а запис нашого будинку порожній). Тому головне — наша лінія (`line`, черга
+ * з /queue): запис будинку беремо, лише якщо він про неї; інакше — найчастіший запис будинків цієї ж вулиці на ній.
  */
 export async function fetchAddressOutage(
   ctx: Ctx,
@@ -177,8 +190,15 @@ export async function fetchAddressOutage(
   if (!res.ok) return { ok: false };
   const tz = ctx.env.TIMEZONE;
   const key = findHouseKey(res.houses, house);
-  const own = key ? toOutage(res.houses[key], tz) : null;
-  if (own || !line) return { ok: true, outage: own };
+  const ownRaw = key ? res.houses[key] : undefined;
+  await rememberLines(ctx, linesOf(ownRaw));
+  const own = toOutage(ownRaw, tz);
+  if (!line) return { ok: true, outage: own };
+
+  // Наша лінія — головне: запис будинку беремо, лише якщо він про неї (або лінію не вказано).
+  // Відключення іншої лінії будинку (напр. 23.1) нас не стосується — шукаємо по своїй.
+  const ownLines = linesOf(ownRaw);
+  if (own && (ownLines.length === 0 || ownLines.includes(line))) return { ok: true, outage: own };
 
   const gpv = `GPV${line}`;
   const counts = new Map<string, { outage: DtekOutage; n: number }>();
