@@ -20,6 +20,8 @@ export interface DtekOutage {
   reason: string;
   start: number | null;
   end: number | null;
+  /** Взято не з запису будинку, а з будинків на тій самій лінії (черзі), напр. "20.1" */
+  line?: string;
 }
 
 interface RawHouse {
@@ -157,12 +159,44 @@ export function groupOf(raw: RawHouse | undefined): string | null {
 export type ConfiguredOutage = { ok: true; outage: DtekOutage | null } | { ok: false };
 
 /** Поточне відключення за адресою з /address. null — ДТЕК нічого не повідомляє. */
-export async function fetchAddressOutage(ctx: Ctx, street: string, house: string): Promise<ConfiguredOutage> {
+/**
+ * Поточне відключення за адресою з /address. null — ДТЕК нічого не повідомляє.
+ *
+ * Будинок може живитися від двох ліній у різних чергах (наш — GPV20.1 і GPV23.1). Коли вимкнена лише одна, запис
+ * будинку лишається порожнім, хоча квартира на цій лінії без світла (реальний випадок: «Аварійні ремонтні роботи»
+ * 06:08 у будинках вулиці на лінії 20.1, а запис нашого будинку порожній). Тоді беремо запис будинків цієї ж вулиці
+ * на нашій лінії (`line` — черга з /queue): найчастіший серед них.
+ */
+export async function fetchAddressOutage(
+  ctx: Ctx,
+  street: string,
+  house: string,
+  line?: string | null,
+): Promise<ConfiguredOutage> {
   const res = await fetchStreet(ctx, street);
   if (!res.ok) return { ok: false };
+  const tz = ctx.env.TIMEZONE;
   const key = findHouseKey(res.houses, house);
-  return { ok: true, outage: key ? toOutage(res.houses[key], ctx.env.TIMEZONE) : null };
+  const own = key ? toOutage(res.houses[key], tz) : null;
+  if (own || !line) return { ok: true, outage: own };
+
+  const gpv = `GPV${line}`;
+  const counts = new Map<string, { outage: DtekOutage; n: number }>();
+  for (const [k, raw] of Object.entries(res.houses)) {
+    if (k === key || !(raw.sub_type_reason ?? []).includes(gpv)) continue;
+    const o = toOutage(raw, tz);
+    if (!o) continue;
+    const id = `${o.reason}|${o.start}|${o.end}`;
+    const entry = counts.get(id) ?? { outage: o, n: 0 };
+    entry.n += 1;
+    counts.set(id, entry);
+  }
+  const best = [...counts.values()].sort((a, b) => b.n - a.n)[0];
+  return { ok: true, outage: best ? { ...best.outage, line } : null };
 }
+
+/** Черга з /queue ("dtek-kem:20.1") → лінія "20.1" для пошуку по сусідніх будинках */
+export const lineOf = (scheduleGroup: string | null) => scheduleGroup?.split(':')[1] ?? null;
 
 /** Відключення ДТЕК, що відповідає нашому (почалось у `at`); старі записи відкидаємо */
 export function matchesOutage(o: DtekOutage, at: number): boolean {
@@ -175,7 +209,7 @@ export interface TrackedDtek extends DtekOutage {
 }
 
 export function dtekLines(o: TrackedDtek, now: number, tz: string): string[] {
-  const lines = [`⚡️ ДТЕК: ${o.reason}`];
+  const lines = [`⚡️ ДТЕК${o.line ? ` (лінія ${o.line})` : ''}: ${o.reason}`];
   if (o.end === null) {
     lines.push('🕦 Час відновлення ДТЕК ще не повідомив');
   } else {

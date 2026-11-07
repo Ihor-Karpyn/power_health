@@ -1,7 +1,7 @@
 import { notifyOwner, type Ctx } from './env';
 import { formatDuration, formatTime } from './format';
 import { getState, updateState } from './state';
-import { fetchAddressOutage, fetchStreet, fetchStreets, findHouseKey, groupOf, toOutage, type DtekOutage } from './dtek';
+import { fetchAddressOutage, fetchStreet, fetchStreets, findHouseKey, groupOf, lineOf, toOutage, type DtekOutage } from './dtek';
 import { describeGroup, fetchGroup, loadConfiguredGroup, normalizeGroupKey } from './schedule';
 import { statsText } from './stats';
 import { inBackground, updatePinnedStatus } from './status-message';
@@ -233,7 +233,7 @@ async function statusText(ctx: Ctx): Promise<string> {
   }
   if (s.detector_offline) lines.push("⚠️ Детектор не на зв'язку, дані можуть бути застарілими");
   if (s.dtek_street && s.dtek_house) {
-    const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house);
+    const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house, lineOf(s.schedule_group));
     lines.push(
       !res.ok
         ? '⚡️ ДТЕК зараз не відповідає'
@@ -306,7 +306,8 @@ async function queue(ctx: Ctx, arg: string): Promise<string> {
 }
 
 function describeDtek(o: DtekOutage, now: number, tz: string): string {
-  return o.end !== null ? `${o.reason}, відновлення до ${formatTime(o.end, tz, now)}` : o.reason;
+  const reason = `${o.line ? `(лінія ${o.line}) ` : ''}${o.reason}`;
+  return o.end !== null ? `${reason}, відновлення до ${formatTime(o.end, tz, now)}` : reason;
 }
 
 const ADDRESS_HINT = 'Напиши адресу так, як на сайті ДТЕК: /address вул. Кониського Олександра, 70/72';

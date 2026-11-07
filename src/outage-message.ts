@@ -1,5 +1,5 @@
 import type { Ctx } from './env';
-import { fetchAddressOutage, dtekLines, matchesOutage, type TrackedDtek } from './dtek';
+import { fetchAddressOutage, dtekLines, lineOf, matchesOutage, type TrackedDtek } from './dtek';
 import { updateState, type State } from './state';
 
 const DAY = 86_400_000;
@@ -27,7 +27,7 @@ export function renderOff(parts: OffParts, dtek: TrackedDtek | null, now: number
 /** Дані ДТЕК для відключення, що почалось у `at`. null — адреса не задана, ДТЕК мовчить або недоступний. */
 export async function dtekForOutage(ctx: Ctx, s: State, at: number): Promise<TrackedDtek | null> {
   if (!s.dtek_street || !s.dtek_house) return null;
-  const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house);
+  const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house, lineOf(s.schedule_group));
   if (!res.ok || !res.outage || !matchesOutage(res.outage, at)) return null;
   return { ...res.outage, firstEnd: res.outage.end };
 }
@@ -41,7 +41,7 @@ export async function refreshOutageMessage(ctx: Ctx, s: State): Promise<void> {
   if (s.off_message_chat_id === null || s.off_message_id === null) return;
   if (!s.dtek_street || !s.dtek_house || ctx.now() - s.mode_since > DAY) return;
 
-  const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house);
+  const res = await fetchAddressOutage(ctx, s.dtek_street, s.dtek_house, lineOf(s.schedule_group));
   if (!res.ok) return; // сайт ДТЕК не відповів — нічого не стверджуємо
   const parts = JSON.parse(s.off_parts) as OffParts;
 

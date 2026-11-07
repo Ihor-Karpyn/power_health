@@ -923,6 +923,49 @@ describe('DTEK address data', () => {
     expect(edits()).toEqual([]);
   });
 
+  describe('house on two lines (real case: GPV20.1 + GPV23.1)', () => {
+    const REPAIR = 'Аварійні ремонтні роботи';
+    const lineHouse = (group: string, sub = REPAIR, start = '11:03 05.11.2026', end = '12:50 05.11.2026') => ({
+      ...house(sub, start, end),
+      sub_type_reason: [group],
+    });
+
+    beforeEach(async () => {
+      // наш будинок на двох лініях: вимкнена лише 20.1 — запис будинку порожній
+      ctx.dtekStreets[STREET] = {
+        '70/72': { ...house(), sub_type_reason: ['GPV20.1', 'GPV23.1'] },
+        '34': lineHouse('GPV20.1'),
+        '60': lineHouse('GPV20.1'),
+        '65': lineHouse('GPV20.1', REPAIR, '17:40 04.11.2026', '12:45 05.11.2026'), // старе — не наше
+        '12': lineHouse('GPV23.1', 'Стабілізаційне відключення', '11:03 05.11.2026', '15:00 05.11.2026'), // інша лінія
+      };
+      await startTracking();
+      await setAddress(); // черга 20.1 підставиться з першої групи будинку
+    });
+
+    it('takes the outage of houses on our line when the house record is empty', async () => {
+      ctx.advance(63 * MIN); // 11:03
+      await report(false);
+      expect(ctx.sent()[0]).toBe(
+        `🔴 Світло зникло о 11:03\nСвітло було: ≈ 1 год 3 хв\n⚡️ ДТЕК (лінія 20.1): ${REPAIR}\n🕦 Орієнтовне відновлення: до 12:50`,
+      );
+    });
+
+    it('does not claim "DTEK does not see the outage" in that case', async () => {
+      ctx.dtekStreets[STREET]!['34'] = house(); // ДТЕК зареєстрував із запізненням
+      ctx.dtekStreets[STREET]!['60'] = house();
+      ctx.advance(63 * MIN);
+      await report(false);
+      ctx.dtekStreets[STREET]!['34'] = lineHouse('GPV20.1');
+      ctx.clear();
+      ctx.advance(20 * MIN);
+      await runCron(ctx);
+      expect(edits()).toEqual([
+        `🔴 Світло зникло о 11:03\nСвітло було: ≈ 1 год 3 хв\n⚡️ ДТЕК (лінія 20.1): ${REPAIR}\n🕦 Орієнтовне відновлення: до 12:50`,
+      ]);
+    });
+  });
+
   it('ignores a DTEK record left from an earlier outage', async () => {
     await startTracking();
     await setAddress();
